@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "projects": [
+    {
+      "id": "sample-project",
+      "root": "./sample-project",
+      "sensitivity": "private",
+      "cloud_allowed": false,
+      "permission_mode": "sandboxed-write"
+    }
+  ],
+  "providers": {
+    "codex_native": true,
+    "claude_native": true,
+    "ollama_local": true
+  },
+  "consultant": {
+    "enabled": false,
+    "model": "deepseek/deepseek-v4-flash-0731",
+    "min_confidence": 0.8,
+    "monthly_hard_cap_usd": 5.0,
+    "warning_usd": 4.0,
+    "per_job_cap_usd": 0.1
+  }
+}
