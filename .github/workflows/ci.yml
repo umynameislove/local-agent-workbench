@@ -42,6 +42,9 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --frozen --all-groups
 
+      - name: Verify repository boundary
+        run: uv run python repo_boundary.py .
+
       - name: Run lint checks
         run: uv run ruff check .
 
