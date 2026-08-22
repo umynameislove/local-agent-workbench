@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 
 from engine import APP_VERSION, RUNTIME_ENV, RuntimeHome, resolve_runtime_home
+from logging_setup import configure_logging
 
 
 def create_app(
@@ -20,11 +21,19 @@ def create_app(
     runtime_home_configured = bool(
         (os.environ if env is None else env).get(RUNTIME_ENV, "").strip()
     )
+    logger = configure_logging()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.bootstrap()
         app.state.runtime = runtime
+        logger.info(
+            "Runtime storage is ready.",
+            extra={
+                "event": "runtime.bootstrap.completed",
+                "context": {"runtime_home_configured": runtime_home_configured},
+            },
+        )
         yield
 
     api = FastAPI(title="Local Agent Workbench", version=APP_VERSION, lifespan=lifespan)
