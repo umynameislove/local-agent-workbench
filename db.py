@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+import json
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from engine import PermissionMode, ProjectConfig, Sensitivity
+from engine import (
+    JobCreate,
+    JobRuntime,
+    JobState,
+    JobUpdate,
+    PermissionMode,
+    ProjectConfig,
+    Sensitivity,
+)
 
 
 class DatabaseError(RuntimeError):
@@ -41,6 +51,22 @@ class ProjectNotFoundError(ProjectRepositoryError):
     """Raised when a requested project does not exist."""
 
 
+class JobRepositoryError(DatabaseError):
+    """Base error for safe job persistence failures."""
+
+
+class JobValidationError(JobRepositoryError):
+    """Raised when a job violates the persistence contract."""
+
+
+class JobAlreadyExistsError(JobRepositoryError):
+    """Raised when a job id is already registered."""
+
+
+class JobNotFoundError(JobRepositoryError):
+    """Raised when a requested job does not exist."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -66,6 +92,20 @@ class ProjectRecord:
             cloud_allowed=self.cloud_allowed,
             permission_mode=self.permission_mode,
         )
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    id: str
+    project_id: str
+    request: str
+    request_snapshot: dict[str, Any]
+    state: JobState
+    runtime: JobRuntime
+    model: str | None
+    worktree_path: str | None
+    created_at: str
+    updated_at: str
 
 
 MIGRATIONS = (
@@ -109,6 +149,52 @@ MIGRATIONS = (
                 )
             )
             """,
+        ),
+    ),
+    Migration(
+        version=3,
+        name="create_jobs",
+        statements=(
+            """
+            CREATE TABLE jobs (
+                id TEXT PRIMARY KEY
+                    CHECK (length(id) > 0 AND id = trim(id) AND instr(id, char(0)) = 0),
+                project_id TEXT NOT NULL
+                    REFERENCES projects(id) ON DELETE RESTRICT,
+                request TEXT NOT NULL
+                    CHECK (length(trim(request)) > 0 AND instr(request, char(0)) = 0),
+                request_snapshot TEXT NOT NULL
+                    CHECK (
+                        json_valid(request_snapshot)
+                        AND json_type(request_snapshot) = 'object'
+                    ),
+                state TEXT NOT NULL CHECK (state IN (
+                    'created', 'classified', 'planning', 'queued', 'running',
+                    'waiting_input', 'waiting_approval', 'verifying', 'review_ready',
+                    'approved', 'rejected', 'applying', 'completed', 'failed',
+                    'blocked', 'cancelled'
+                )),
+                runtime TEXT NOT NULL
+                    CHECK (runtime IN ('auto', 'claude', 'codex', 'local')),
+                model TEXT CHECK (
+                    model IS NULL OR (
+                        length(model) > 0 AND model = trim(model)
+                        AND instr(model, char(0)) = 0
+                    )
+                ),
+                worktree_path TEXT CHECK (
+                    worktree_path IS NULL OR (
+                        length(worktree_path) > 0 AND worktree_path = trim(worktree_path)
+                        AND instr(worktree_path, char(0)) = 0
+                    )
+                ),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """,
+            "CREATE INDEX jobs_project_created_idx ON jobs (project_id, created_at, id)",
         ),
     ),
 )
@@ -235,9 +321,46 @@ class Database:
         return version
 
 
-class ProjectRepository:
+class _Repository:
+    error_type: type[DatabaseError]
+    storage_name: str
+
     def __init__(self, database: Database) -> None:
         self.database = database
+
+    @contextmanager
+    def _connection(self) -> Iterator[sqlite3.Connection]:
+        if not self.database.path.is_file():
+            raise self.error_type(f"{self.storage_name} storage is unavailable.")
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(self.database.path, timeout=5.0, isolation_level=None)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            yield connection
+        except sqlite3.Error as error:
+            raise self.error_type(f"{self.storage_name} storage operation failed.") from error
+        finally:
+            if connection is not None:
+                connection.close()
+
+    @contextmanager
+    def _write_connection(self) -> Iterator[sqlite3.Connection]:
+        with self._connection() as connection:
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                yield connection
+                connection.execute("COMMIT")
+            except Exception:
+                if connection.in_transaction:
+                    connection.execute("ROLLBACK")
+                raise
+
+
+class ProjectRepository(_Repository):
+    error_type = ProjectRepositoryError
+    storage_name = "Project"
 
     def create(self, project: ProjectConfig) -> ProjectRecord:
         self._validate_project(project)
@@ -332,44 +455,6 @@ class ProjectRepository:
             if result.rowcount != 1:
                 raise ProjectNotFoundError("Project does not exist.")
 
-    @contextmanager
-    def _connection(self) -> Iterator[sqlite3.Connection]:
-        if not self.database.path.is_file():
-            raise ProjectRepositoryError("Project storage is unavailable.")
-        connection: sqlite3.Connection | None = None
-        try:
-            connection = sqlite3.connect(
-                self.database.path,
-                timeout=5.0,
-                isolation_level=None,
-            )
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute("PRAGMA busy_timeout = 5000")
-        except sqlite3.Error as error:
-            if connection is not None:
-                connection.close()
-            raise ProjectRepositoryError("Project storage is unavailable.") from error
-
-        try:
-            yield connection
-        except sqlite3.Error as error:
-            raise ProjectRepositoryError("Project storage operation failed.") from error
-        finally:
-            connection.close()
-
-    @contextmanager
-    def _write_connection(self) -> Iterator[sqlite3.Connection]:
-        with self._connection() as connection:
-            try:
-                connection.execute("BEGIN IMMEDIATE")
-                yield connection
-                connection.execute("COMMIT")
-            except Exception:
-                if connection.in_transaction:
-                    connection.execute("ROLLBACK")
-                raise
-
     @staticmethod
     def _select_by_id(
         connection: sqlite3.Connection,
@@ -451,3 +536,199 @@ class ProjectRepository:
             "SQLITE_CONSTRAINT_PRIMARYKEY",
             "SQLITE_CONSTRAINT_UNIQUE",
         }
+
+
+class JobRepository(_Repository):
+    error_type = JobRepositoryError
+    storage_name = "Job"
+
+    def create(self, job: JobCreate) -> JobRecord:
+        snapshot = self._validate_job(job)
+        with self._write_connection() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO jobs (
+                        id, project_id, request, request_snapshot, state,
+                        runtime, model, worktree_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job.id,
+                        job.project_id,
+                        job.request,
+                        snapshot,
+                        job.state.value,
+                        job.runtime.value,
+                        job.model,
+                        job.worktree_path,
+                    ),
+                )
+                row = self._select_by_id(connection, job.id)
+                if row is None:
+                    raise JobRepositoryError("Job could not be created.")
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                error_name = getattr(error, "sqlite_errorname", "")
+                if error_name in {"SQLITE_CONSTRAINT_PRIMARYKEY", "SQLITE_CONSTRAINT_UNIQUE"}:
+                    raise JobAlreadyExistsError("A job with this id already exists.") from error
+                if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise JobValidationError("Job project does not exist.") from error
+                raise JobRepositoryError("Job could not be created.") from error
+        return stored
+
+    def update(self, job: JobUpdate) -> JobRecord:
+        self._validate_update(job)
+        with self._write_connection() as connection:
+            result = connection.execute(
+                """
+                UPDATE jobs
+                SET state = ?, runtime = ?, model = ?, worktree_path = ?,
+                    updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+                WHERE id = ?
+                """,
+                (job.state.value, job.runtime.value, job.model, job.worktree_path, job.id),
+            )
+            if result.rowcount != 1:
+                raise JobNotFoundError("Job does not exist.")
+            row = self._select_by_id(connection, job.id)
+            if row is None:
+                raise JobRepositoryError("Job could not be updated.")
+            stored = self._to_record(row)
+        return stored
+
+    def get(self, job_id: str) -> JobRecord:
+        normalized_id = self._validate_text(job_id, field="id")
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise JobNotFoundError("Job does not exist.")
+        return self._to_record(row)
+
+    def list(self, *, project_id: str | None = None) -> tuple[JobRecord, ...]:
+        parameters: tuple[str, ...] = ()
+        where = ""
+        if project_id is not None:
+            parameters = (self._validate_text(project_id, field="project_id"),)
+            where = "WHERE project_id = ?"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, project_id, request, request_snapshot, state,
+                       runtime, model, worktree_path, created_at, updated_at
+                FROM jobs
+                {where}
+                ORDER BY created_at, id
+                """,
+                parameters,
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(connection: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, project_id, request, request_snapshot, state,
+                   runtime, model, worktree_path, created_at, updated_at
+            FROM jobs
+            WHERE id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    @classmethod
+    def _validate_job(cls, job: JobCreate) -> str:
+        if not isinstance(job, JobCreate):
+            raise JobValidationError("Job must use the supported creation contract.")
+        cls._validate_text(job.id, field="id")
+        cls._validate_text(job.project_id, field="project_id")
+        if not isinstance(job.request, str) or not job.request.strip() or "\x00" in job.request:
+            raise JobValidationError("Job request is invalid.")
+        if len(job.request.encode("utf-8")) > 262_144:
+            raise JobValidationError("Job request is too large.")
+        if not isinstance(job.state, JobState):
+            raise JobValidationError("Job state is invalid.")
+        if not isinstance(job.runtime, JobRuntime):
+            raise JobValidationError("Job runtime is invalid.")
+        cls._validate_optional_text(job.model, field="model")
+        cls._validate_optional_text(job.worktree_path, field="worktree_path")
+        if not isinstance(job.request_snapshot, Mapping):
+            raise JobValidationError("Job request snapshot must be an object.")
+        try:
+            source_snapshot = dict(job.request_snapshot)
+            snapshot = json.dumps(
+                source_snapshot,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            decoded_snapshot = json.loads(snapshot)
+        except (RecursionError, TypeError, ValueError) as error:
+            raise JobValidationError("Job request snapshot is invalid.") from error
+        if decoded_snapshot != source_snapshot:
+            raise JobValidationError("Job request snapshot is not JSON canonical.")
+        if len(snapshot.encode("utf-8")) > 1_048_576:
+            raise JobValidationError("Job request snapshot is too large.")
+        return snapshot
+
+    @classmethod
+    def _validate_update(cls, job: JobUpdate) -> None:
+        if not isinstance(job, JobUpdate):
+            raise JobValidationError("Job must use the supported update contract.")
+        cls._validate_text(job.id, field="id")
+        if not isinstance(job.state, JobState) or not isinstance(job.runtime, JobRuntime):
+            raise JobValidationError("Job state or runtime is invalid.")
+        cls._validate_optional_text(job.model, field="model")
+        cls._validate_optional_text(job.worktree_path, field="worktree_path")
+
+    @staticmethod
+    def _validate_text(value: object, *, field: str) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise JobValidationError(f"Job {field} is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_optional_text(value: object, *, field: str) -> None:
+        if value is not None and (
+            not isinstance(value, str) or not value or value != value.strip() or "\x00" in value
+        ):
+            raise JobValidationError(f"Job {field} is invalid.")
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> JobRecord:
+        try:
+            snapshot = json.loads(row["request_snapshot"])
+            if not isinstance(snapshot, dict):
+                raise ValueError
+            job = JobCreate(
+                id=row["id"],
+                project_id=row["project_id"],
+                request=row["request"],
+                request_snapshot=snapshot,
+                state=JobState(row["state"]),
+                runtime=JobRuntime(row["runtime"]),
+                model=row["model"],
+                worktree_path=row["worktree_path"],
+            )
+            cls._validate_job(job)
+            created_at = row["created_at"]
+            updated_at = row["updated_at"]
+            if not isinstance(created_at, str) or not created_at:
+                raise ValueError
+            if not isinstance(updated_at, str) or not updated_at:
+                raise ValueError
+            return JobRecord(
+                id=job.id,
+                project_id=job.project_id,
+                request=job.request,
+                request_snapshot=snapshot,
+                state=job.state,
+                runtime=job.runtime,
+                model=job.model,
+                worktree_path=job.worktree_path,
+                created_at=created_at,
+                updated_at=updated_at,
+            )
+        except (IndexError, KeyError, JobValidationError, TypeError, ValueError) as error:
+            raise JobRepositoryError("Stored job data is invalid.") from error

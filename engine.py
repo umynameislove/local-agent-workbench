@@ -32,6 +32,32 @@ class PermissionMode(StrEnum):
     NEVER = "never"
 
 
+class JobState(StrEnum):
+    CREATED = "created"
+    CLASSIFIED = "classified"
+    PLANNING = "planning"
+    QUEUED = "queued"
+    RUNNING = "running"
+    WAITING_INPUT = "waiting_input"
+    WAITING_APPROVAL = "waiting_approval"
+    VERIFYING = "verifying"
+    REVIEW_READY = "review_ready"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    APPLYING = "applying"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    BLOCKED = "blocked"
+    CANCELLED = "cancelled"
+
+
+class JobRuntime(StrEnum):
+    AUTO = "auto"
+    CLAUDE = "claude"
+    CODEX = "codex"
+    LOCAL = "local"
+
+
 @dataclass(frozen=True)
 class RuntimeHome:
     root: Path
@@ -114,6 +140,27 @@ class ProjectConfig:
                 value.get("permission_mode", PermissionMode.SANDBOXED_WRITE)
             ),
         )
+
+
+@dataclass(frozen=True)
+class JobCreate:
+    id: str
+    project_id: str
+    request: str
+    request_snapshot: Mapping[str, Any]
+    state: JobState = JobState.CREATED
+    runtime: JobRuntime = JobRuntime.AUTO
+    model: str | None = None
+    worktree_path: str | None = None
+
+
+@dataclass(frozen=True)
+class JobUpdate:
+    id: str
+    state: JobState
+    runtime: JobRuntime
+    model: str | None = None
+    worktree_path: str | None = None
 
 
 @dataclass(frozen=True)

@@ -7,8 +7,8 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 
-from db import Database, ProjectRepository
-from engine import APP_VERSION, RUNTIME_ENV, RuntimeHome, resolve_runtime_home
+from db import Database, JobRepository, ProjectRepository
+from engine import APP_VERSION, RUNTIME_ENV, JobRuntime, RuntimeHome, resolve_runtime_home
 from logging_setup import configure_logging
 
 
@@ -32,6 +32,7 @@ def create_app(
         app.state.runtime = runtime
         app.state.database = database
         app.state.project_repository = ProjectRepository(database)
+        app.state.job_repository = JobRepository(database)
         app.state.schema_version = schema_version
         logger.info(
             "Runtime storage is ready.",
@@ -71,7 +72,7 @@ def create_app(
         return {
             "version": APP_VERSION,
             "windows": ["workspace", "planner"],
-            "runtimes": ["auto", "claude", "codex", "local"],
+            "runtimes": [runtime.value for runtime in JobRuntime],
             "consultant": {
                 "role": "advice-only",
                 "can_execute": False,
