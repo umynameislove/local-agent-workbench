@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 
-from db import Database
+from db import Database, ProjectRepository
 from engine import APP_VERSION, RUNTIME_ENV, RuntimeHome, resolve_runtime_home
 from logging_setup import configure_logging
 
@@ -31,6 +31,7 @@ def create_app(
         schema_version = database.initialize()
         app.state.runtime = runtime
         app.state.database = database
+        app.state.project_repository = ProjectRepository(database)
         app.state.schema_version = schema_version
         logger.info(
             "Runtime storage is ready.",
