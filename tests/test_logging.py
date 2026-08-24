@@ -234,7 +234,7 @@ async def test_application_lifecycle_emits_safe_bootstrap_event(
     records = parse_lines(stream)
     assert records == [
         {
-            "context": {"runtime_home_configured": True},
+            "context": {"runtime_home_configured": True, "schema_version": 1},
             "event": "runtime.bootstrap.completed",
             "level": "INFO",
             "logger": LOGGER_NAME,

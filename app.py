@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 
+from db import Database
 from engine import APP_VERSION, RUNTIME_ENV, RuntimeHome, resolve_runtime_home
 from logging_setup import configure_logging
 
@@ -26,12 +27,19 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.bootstrap()
+        database = Database(runtime.state_db)
+        schema_version = database.initialize()
         app.state.runtime = runtime
+        app.state.database = database
+        app.state.schema_version = schema_version
         logger.info(
             "Runtime storage is ready.",
             extra={
                 "event": "runtime.bootstrap.completed",
-                "context": {"runtime_home_configured": runtime_home_configured},
+                "context": {
+                    "runtime_home_configured": runtime_home_configured,
+                    "schema_version": schema_version,
+                },
             },
         )
         yield
@@ -51,7 +59,10 @@ def create_app(
                 "cache_ready": active.cache.is_dir(),
                 "worktrees_ready": active.worktrees.is_dir(),
             },
-            "database": {"status": "not_initialized"},
+            "database": {
+                "status": "ready",
+                "schema_version": request.app.state.schema_version,
+            },
         }
 
     @api.get("/api/bootstrap")

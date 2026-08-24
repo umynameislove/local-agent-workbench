@@ -95,7 +95,8 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         "cache_ready": True,
         "worktrees_ready": True,
     }
-    assert health.json()["database"] == {"status": "not_initialized"}
+    assert health.json()["database"] == {"status": "ready", "schema_version": 1}
+    assert (tmp_path / "runtime" / "state.db").is_file()
     assert bootstrap.json()["runtimes"] == ["auto", "claude", "codex", "local"]
     assert bootstrap.json()["consultant"]["can_execute"] is False
 
