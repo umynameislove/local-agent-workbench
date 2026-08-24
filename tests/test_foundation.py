@@ -7,7 +7,7 @@ import httpx
 import pytest
 
 from app import create_app
-from db import LATEST_SCHEMA_VERSION, ProjectRepository
+from db import LATEST_SCHEMA_VERSION, JobRepository, ProjectRepository
 from engine import (
     CONSULTANT_MODEL,
     ConfigurationError,
@@ -84,6 +84,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
 
     async with api.router.lifespan_context(api):
         assert isinstance(api.state.project_repository, ProjectRepository)
+        assert isinstance(api.state.job_repository, JobRepository)
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             health = await client.get("/api/health")

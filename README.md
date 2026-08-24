@@ -50,7 +50,7 @@ The application will use `AGENT_WORKBENCH_HOME` to locate its runtime home. Pers
 
 Foundation implementation is in progress. The first usable vertical slice remains one project, one native provider, one worktree, one diff and one approval. Internal planning, mockups, benchmarks and progress tracking are intentionally maintained outside this public repository.
 
-Current foundation includes the runtime home boundary, initial local directories, versioned public config, strict consultant response validation and `/api/health` plus `/api/bootstrap`. The durable state layer now includes embedded sequential SQLite migrations and project persistence with explicit identity, root, sensitivity and permission policy constraints.
+Current foundation includes the runtime home boundary, initial local directories, versioned public config, strict consultant response validation and `/api/health` plus `/api/bootstrap`. The durable state layer now includes embedded sequential SQLite migrations plus project and job persistence with explicit identity, policy, runtime, request snapshot and restart recovery contracts.
 
 ## Development quick start
 
