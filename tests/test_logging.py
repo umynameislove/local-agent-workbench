@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app import create_app
+from db import LATEST_SCHEMA_VERSION
 from logging_setup import LOGGER_NAME, REDACTED, configure_logging, redact
 
 SYNTHETIC_SECRET = "synthetic" + "_secret_value_123456"
@@ -234,7 +235,10 @@ async def test_application_lifecycle_emits_safe_bootstrap_event(
     records = parse_lines(stream)
     assert records == [
         {
-            "context": {"runtime_home_configured": True, "schema_version": 1},
+            "context": {
+                "runtime_home_configured": True,
+                "schema_version": LATEST_SCHEMA_VERSION,
+            },
             "event": "runtime.bootstrap.completed",
             "level": "INFO",
             "logger": LOGGER_NAME,
