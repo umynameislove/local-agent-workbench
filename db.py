@@ -81,6 +81,10 @@ class EventNotFoundError(EventRepositoryError):
     """Raised when a requested event does not exist."""
 
 
+class EventIdempotencyConflictError(EventRepositoryError):
+    """Raised when an idempotency key is reused for a different event."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -130,6 +134,7 @@ class EventRecord:
     event_type: str
     payload: dict[str, Any]
     payload_hash: str
+    idempotency_key: str | None
     created_at: str
 
 
@@ -265,6 +270,27 @@ MIGRATIONS = (
             BEGIN
                 SELECT RAISE(ABORT, 'Events are append only.');
             END
+            """,
+        ),
+    ),
+    Migration(
+        version=5,
+        name="add_event_idempotency",
+        statements=(
+            """
+            ALTER TABLE events ADD COLUMN idempotency_key TEXT CHECK (
+                idempotency_key IS NULL OR (
+                    length(idempotency_key) > 0
+                    AND length(CAST(idempotency_key AS BLOB)) <= 128
+                    AND idempotency_key = trim(idempotency_key)
+                    AND instr(idempotency_key, char(0)) = 0
+                )
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX events_job_idempotency_idx
+            ON events (job_id, idempotency_key)
+            WHERE idempotency_key IS NOT NULL
             """,
         ),
     ),
@@ -810,9 +836,23 @@ class EventRepository(_Repository):
     storage_name = "Event"
 
     def append(self, event: EventCreate) -> EventRecord:
-        payload, payload_hash = self._validate_event(event)
+        payload, payload_hash, idempotency_key = self._validate_event(event)
         with self._write_connection() as connection:
             try:
+                if idempotency_key is not None:
+                    existing = self._select_by_idempotency_key(
+                        connection, event.job_id, idempotency_key
+                    )
+                    if existing is not None:
+                        stored = self._to_record(existing)
+                        if (
+                            stored.event_type != event.event_type
+                            or stored.payload_hash != payload_hash
+                        ):
+                            raise EventIdempotencyConflictError(
+                                "Event idempotency key conflicts with stored data."
+                            )
+                        return stored
                 latest = connection.execute(
                     """
                     SELECT sequence
@@ -834,8 +874,9 @@ class EventRepository(_Repository):
                 result = connection.execute(
                     """
                     INSERT INTO events (
-                        job_id, sequence, event_type, payload, payload_hash
-                    ) VALUES (?, ?, ?, ?, ?)
+                        job_id, sequence, event_type, payload, payload_hash,
+                        idempotency_key
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         event.job_id,
@@ -843,6 +884,7 @@ class EventRepository(_Repository):
                         event.event_type,
                         payload,
                         payload_hash,
+                        idempotency_key,
                     ),
                 )
                 event_id = result.lastrowid
@@ -873,7 +915,7 @@ class EventRepository(_Repository):
             rows = connection.execute(
                 """
                 SELECT id, job_id, sequence, event_type, payload,
-                       payload_hash, created_at
+                       payload_hash, idempotency_key, created_at
                 FROM events
                 WHERE job_id = ?
                 ORDER BY sequence
@@ -887,20 +929,38 @@ class EventRepository(_Repository):
         return connection.execute(
             """
             SELECT id, job_id, sequence, event_type, payload,
-                   payload_hash, created_at
+                   payload_hash, idempotency_key, created_at
             FROM events
             WHERE id = ?
             """,
             (event_id,),
         ).fetchone()
 
+    @staticmethod
+    def _select_by_idempotency_key(
+        connection: sqlite3.Connection, job_id: str, idempotency_key: str
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, job_id, sequence, event_type, payload,
+                   payload_hash, idempotency_key, created_at
+            FROM events
+            WHERE job_id = ? AND idempotency_key = ?
+            """,
+            (job_id, idempotency_key),
+        ).fetchone()
+
     @classmethod
-    def _validate_event(cls, event: EventCreate) -> tuple[str, str]:
+    def _validate_event(cls, event: EventCreate) -> tuple[str, str, str | None]:
         if not isinstance(event, EventCreate):
             raise EventValidationError("Event must use the supported creation contract.")
         cls._validate_text(event.job_id, field="job_id")
         cls._validate_text(event.event_type, field="event_type", maximum_bytes=128)
-        return cls._canonical_payload(event.payload)
+        idempotency_key = cls._validate_optional_text(
+            event.idempotency_key, field="idempotency_key", maximum_bytes=128
+        )
+        payload, payload_hash = cls._canonical_payload(event.payload)
+        return payload, payload_hash, idempotency_key
 
     @staticmethod
     def _validate_event_id(event_id: object) -> int:
@@ -915,6 +975,14 @@ class EventRepository(_Repository):
         if maximum_bytes is not None and len(value.encode("utf-8")) > maximum_bytes:
             raise EventValidationError(f"Event {field} is too large.")
         return value
+
+    @classmethod
+    def _validate_optional_text(
+        cls, value: object, *, field: str, maximum_bytes: int | None = None
+    ) -> str | None:
+        if value is None:
+            return None
+        return cls._validate_text(value, field=field, maximum_bytes=maximum_bytes)
 
     @staticmethod
     def _canonical_payload(payload: object) -> tuple[str, str]:
@@ -958,6 +1026,9 @@ class EventRepository(_Repository):
             payload_hash = row["payload_hash"]
             if canonical_payload != stored_payload or payload_hash != expected_hash:
                 raise EventValidationError("Event payload integrity check failed.")
+            idempotency_key = cls._validate_optional_text(
+                row["idempotency_key"], field="idempotency_key", maximum_bytes=128
+            )
             created_at = row["created_at"]
             if not isinstance(created_at, str) or not created_at:
                 raise EventValidationError("Event timestamp is invalid.")
@@ -968,6 +1039,7 @@ class EventRepository(_Repository):
                 event_type=event_type,
                 payload=decoded_payload,
                 payload_hash=payload_hash,
+                idempotency_key=idempotency_key,
                 created_at=created_at,
             )
         except (

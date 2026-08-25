@@ -168,6 +168,7 @@ class EventCreate:
     job_id: str
     event_type: str
     payload: Mapping[str, Any]
+    idempotency_key: str | None = None
 
 
 @dataclass(frozen=True)
