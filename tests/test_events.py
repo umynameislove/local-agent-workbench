@@ -13,6 +13,7 @@ from db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     Database,
+    EventIdempotencyConflictError,
     EventNotFoundError,
     EventRepository,
     EventRepositoryError,
@@ -292,3 +293,232 @@ def test_event_queries_treat_identifiers_and_types_as_data(tmp_path: Path) -> No
     )
 
     assert repository.list(unusual_id) == (stored,)
+
+
+def test_version_four_database_adds_idempotency_without_losing_events(tmp_path: Path) -> None:
+    path = tmp_path / "state.db"
+    legacy = Database(path, migrations=MIGRATIONS[:4])
+    assert legacy.initialize() == 4
+    ProjectRepository(legacy).create(project())
+    JobRepository(legacy).create(job())
+    payload = '{"legacy":true}'
+    payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            INSERT INTO events (
+                job_id, sequence, event_type, payload, payload_hash
+            ) VALUES ('job-001', 1, 'job.progress', ?, ?)
+            """,
+            (payload, payload_hash),
+        )
+
+    upgraded = Database(path)
+    assert upgraded.initialize() == LATEST_SCHEMA_VERSION
+    stored = EventRepository(upgraded).list("job-001")
+    assert len(stored) == 1
+    assert stored[0].payload == {"legacy": True}
+    assert stored[0].idempotency_key is None
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(events)")}
+        index = connection.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'events_job_idempotency_idx'
+            """
+        ).fetchone()
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+    assert "idempotency_key" in columns
+    assert index is not None and "WHERE idempotency_key IS NOT NULL" in index[0]
+
+
+def test_idempotent_retry_returns_original_event_across_restart(tmp_path: Path) -> None:
+    database, repository = initialized_event_repository(tmp_path)
+    original = repository.append(
+        event(
+            payload={"beta": 2, "alpha": 1},
+            idempotency_key="request-001",
+        )
+    )
+    duplicate = repository.append(
+        event(
+            payload={"alpha": 1, "beta": 2},
+            idempotency_key="request-001",
+        )
+    )
+
+    restarted = EventRepository(Database(database.path))
+    assert restarted.database.initialize() == LATEST_SCHEMA_VERSION
+    retried = restarted.append(
+        event(
+            payload={"alpha": 1, "beta": 2},
+            idempotency_key="request-001",
+        )
+    )
+
+    assert duplicate == original
+    assert retried == original
+    assert original.idempotency_key == "request-001"
+    assert restarted.list("job-001") == (original,)
+
+
+def test_idempotency_conflict_rolls_back_without_consuming_sequence(tmp_path: Path) -> None:
+    _, repository = initialized_event_repository(tmp_path)
+    first = repository.append(event(payload={"value": 1}, idempotency_key="request-001"))
+
+    with pytest.raises(EventIdempotencyConflictError, match="conflicts"):
+        repository.append(event(payload={"value": 2}, idempotency_key="request-001"))
+    with pytest.raises(EventIdempotencyConflictError, match="conflicts"):
+        repository.append(
+            event(
+                event_type="job.completed",
+                payload={"value": 1},
+                idempotency_key="request-001",
+            )
+        )
+
+    second = repository.append(event(payload={"value": 2}, idempotency_key="request-002"))
+    assert first.sequence == 1
+    assert second.sequence == 2
+    assert repository.list("job-001") == (first, second)
+
+
+def test_idempotency_keys_are_scoped_to_each_job(tmp_path: Path) -> None:
+    database, repository = initialized_event_repository(tmp_path)
+    JobRepository(database).create(job("job-002"))
+    unusual_key = "key'); DROP TABLE events; SELECT ('"
+
+    first = repository.append(event(idempotency_key="shared-request"))
+    second = repository.append(event(job_id="job-002", idempotency_key="shared-request"))
+    unkeyed_first = repository.append(event(payload={"attempt": 1}))
+    unkeyed_second = repository.append(event(payload={"attempt": 1}))
+    unusual = repository.append(event(idempotency_key=unusual_key))
+
+    assert first.sequence == 1
+    assert second.sequence == 1
+    assert unkeyed_first.id != unkeyed_second.id
+    assert unkeyed_first.sequence == 2
+    assert unkeyed_second.sequence == 3
+    assert repository.append(event(idempotency_key=unusual_key)) == unusual
+
+
+def test_concurrent_idempotent_retries_create_one_event(tmp_path: Path) -> None:
+    _, repository = initialized_event_repository(tmp_path)
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        records = tuple(
+            executor.map(
+                lambda _: repository.append(
+                    event(payload={"effect": "send"}, idempotency_key="request-001")
+                ),
+                range(24),
+            )
+        )
+
+    assert len({record.id for record in records}) == 1
+    assert all(record == records[0] for record in records)
+    assert repository.list("job-001") == (records[0],)
+
+
+def test_concurrent_conflicting_submissions_store_one_effect(tmp_path: Path) -> None:
+    _, repository = initialized_event_repository(tmp_path)
+
+    def submit(value: int) -> object:
+        try:
+            return repository.append(event(payload={"value": value}, idempotency_key="request-001"))
+        except EventIdempotencyConflictError as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(submit, (1, 2)))
+
+    stored = repository.list("job-001")
+    assert len(stored) == 1
+    assert sum(isinstance(outcome, EventIdempotencyConflictError) for outcome in outcomes) == 1
+    assert sum(outcome == stored[0] for outcome in outcomes) == 1
+    following = repository.append(event(payload={"value": 3}, idempotency_key="request-002"))
+    assert following.sequence == 2
+
+
+@pytest.mark.parametrize(
+    "invalid_key",
+    ["", " request", "request ", "unsafe\x00key", "x" * 129, "é" * 65, 7],
+)
+def test_invalid_idempotency_key_is_rejected_before_write(
+    tmp_path: Path, invalid_key: object
+) -> None:
+    _, repository = initialized_event_repository(tmp_path)
+
+    with pytest.raises(EventValidationError):
+        repository.append(event(idempotency_key=invalid_key))
+
+    assert repository.list("job-001") == ()
+
+
+def test_database_enforces_idempotency_key_contract(tmp_path: Path) -> None:
+    database, repository = initialized_event_repository(tmp_path)
+    JobRepository(database).create(job("job-002"))
+    stored = repository.append(event(idempotency_key="request-001"))
+    payload = "{}"
+    payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    with sqlite3.connect(database.path) as connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                """
+                INSERT INTO events (
+                    job_id, sequence, event_type, payload, payload_hash,
+                    idempotency_key
+                ) VALUES ('job-001', 2, 'job.progress', ?, ?, 'request-001')
+                """,
+                (payload, payload_hash),
+            )
+        for invalid_key in (" invalid", "é" * 65):
+            with pytest.raises(sqlite3.IntegrityError):
+                connection.execute(
+                    """
+                    INSERT INTO events (
+                        job_id, sequence, event_type, payload, payload_hash,
+                        idempotency_key
+                    ) VALUES ('job-001', 2, 'job.progress', ?, ?, ?)
+                    """,
+                    (payload, payload_hash, invalid_key),
+                )
+        connection.execute(
+            """
+            INSERT INTO events (
+                job_id, sequence, event_type, payload, payload_hash,
+                idempotency_key
+            ) VALUES ('job-002', 1, 'job.progress', ?, ?, 'request-001')
+            """,
+            (payload, payload_hash),
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="append only"):
+            connection.execute(
+                "UPDATE events SET idempotency_key = 'changed' WHERE id = ?",
+                (stored.id,),
+            )
+
+    assert repository.get(stored.id) == stored
+
+
+def test_corrupted_idempotent_event_fails_closed(tmp_path: Path) -> None:
+    database, repository = initialized_event_repository(tmp_path)
+    with sqlite3.connect(database.path) as connection:
+        connection.execute(
+            """
+            INSERT INTO events (
+                job_id, sequence, event_type, payload, payload_hash,
+                idempotency_key
+            ) VALUES ('job-001', 1, 'job.progress', '{"value":1}', ?, 'request-001')
+            """,
+            ("0" * 64,),
+        )
+
+    with pytest.raises(EventRepositoryError, match="Stored event data is invalid"):
+        repository.append(event(payload={"value": 1}, idempotency_key="request-001"))
+
+    with sqlite3.connect(database.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM events").fetchone() == (1,)
