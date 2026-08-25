@@ -164,6 +164,13 @@ class JobUpdate:
 
 
 @dataclass(frozen=True)
+class EventCreate:
+    job_id: str
+    event_type: str
+    payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
 class ConsultantConfig:
     enabled: bool = False
     model: str = CONSULTANT_MODEL

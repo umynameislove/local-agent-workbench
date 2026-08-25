@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from engine import (
+    EventCreate,
     JobCreate,
     JobRuntime,
     JobState,
@@ -67,6 +69,18 @@ class JobNotFoundError(JobRepositoryError):
     """Raised when a requested job does not exist."""
 
 
+class EventRepositoryError(DatabaseError):
+    """Base error for safe event persistence failures."""
+
+
+class EventValidationError(EventRepositoryError):
+    """Raised when an event violates the persistence contract."""
+
+
+class EventNotFoundError(EventRepositoryError):
+    """Raised when a requested event does not exist."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -106,6 +120,17 @@ class JobRecord:
     worktree_path: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class EventRecord:
+    id: int
+    job_id: str
+    sequence: int
+    event_type: str
+    payload: dict[str, Any]
+    payload_hash: str
+    created_at: str
 
 
 MIGRATIONS = (
@@ -195,6 +220,52 @@ MIGRATIONS = (
             )
             """,
             "CREATE INDEX jobs_project_created_idx ON jobs (project_id, created_at, id)",
+        ),
+    ),
+    Migration(
+        version=4,
+        name="create_events",
+        statements=(
+            """
+            CREATE TABLE events (
+                id INTEGER PRIMARY KEY CHECK (id > 0),
+                job_id TEXT NOT NULL
+                    REFERENCES jobs(id) ON DELETE RESTRICT,
+                sequence INTEGER NOT NULL CHECK (sequence > 0),
+                event_type TEXT NOT NULL CHECK (
+                    length(event_type) > 0
+                    AND length(CAST(event_type AS BLOB)) <= 128
+                    AND event_type = trim(event_type)
+                    AND instr(event_type, char(0)) = 0
+                ),
+                payload TEXT NOT NULL CHECK (
+                    json_valid(payload)
+                    AND json_type(payload) = 'object'
+                    AND length(CAST(payload AS BLOB)) <= 1048576
+                ),
+                payload_hash TEXT NOT NULL CHECK (
+                    length(payload_hash) = 64
+                    AND payload_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                UNIQUE (job_id, sequence)
+            )
+            """,
+            """
+            CREATE TRIGGER events_prevent_update
+            BEFORE UPDATE ON events
+            BEGIN
+                SELECT RAISE(ABORT, 'Events are append only.');
+            END
+            """,
+            """
+            CREATE TRIGGER events_prevent_delete
+            BEFORE DELETE ON events
+            BEGIN
+                SELECT RAISE(ABORT, 'Events are append only.');
+            END
+            """,
         ),
     ),
 )
@@ -732,3 +803,179 @@ class JobRepository(_Repository):
             )
         except (IndexError, KeyError, JobValidationError, TypeError, ValueError) as error:
             raise JobRepositoryError("Stored job data is invalid.") from error
+
+
+class EventRepository(_Repository):
+    error_type = EventRepositoryError
+    storage_name = "Event"
+
+    def append(self, event: EventCreate) -> EventRecord:
+        payload, payload_hash = self._validate_event(event)
+        with self._write_connection() as connection:
+            try:
+                latest = connection.execute(
+                    """
+                    SELECT sequence
+                    FROM events
+                    WHERE job_id = ?
+                    ORDER BY sequence DESC
+                    LIMIT 1
+                    """,
+                    (event.job_id,),
+                ).fetchone()
+                previous_sequence = 0 if latest is None else latest["sequence"]
+                if (
+                    not isinstance(previous_sequence, int)
+                    or isinstance(previous_sequence, bool)
+                    or previous_sequence < 0
+                    or previous_sequence >= 9_223_372_036_854_775_807
+                ):
+                    raise EventRepositoryError("Stored event sequence is invalid.")
+                result = connection.execute(
+                    """
+                    INSERT INTO events (
+                        job_id, sequence, event_type, payload, payload_hash
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event.job_id,
+                        previous_sequence + 1,
+                        event.event_type,
+                        payload,
+                        payload_hash,
+                    ),
+                )
+                event_id = result.lastrowid
+                if not isinstance(event_id, int) or event_id < 1:
+                    raise EventRepositoryError("Event could not be appended.")
+                row = self._select_by_id(connection, event_id)
+                if row is None:
+                    raise EventRepositoryError("Event could not be appended.")
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                error_name = getattr(error, "sqlite_errorname", "")
+                if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise EventValidationError("Event job does not exist.") from error
+                raise EventRepositoryError("Event could not be appended.") from error
+        return stored
+
+    def get(self, event_id: int) -> EventRecord:
+        normalized_id = self._validate_event_id(event_id)
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise EventNotFoundError("Event does not exist.")
+        return self._to_record(row)
+
+    def list(self, job_id: str) -> tuple[EventRecord, ...]:
+        normalized_job_id = self._validate_text(job_id, field="job_id")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, job_id, sequence, event_type, payload,
+                       payload_hash, created_at
+                FROM events
+                WHERE job_id = ?
+                ORDER BY sequence
+                """,
+                (normalized_job_id,),
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(connection: sqlite3.Connection, event_id: int) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, job_id, sequence, event_type, payload,
+                   payload_hash, created_at
+            FROM events
+            WHERE id = ?
+            """,
+            (event_id,),
+        ).fetchone()
+
+    @classmethod
+    def _validate_event(cls, event: EventCreate) -> tuple[str, str]:
+        if not isinstance(event, EventCreate):
+            raise EventValidationError("Event must use the supported creation contract.")
+        cls._validate_text(event.job_id, field="job_id")
+        cls._validate_text(event.event_type, field="event_type", maximum_bytes=128)
+        return cls._canonical_payload(event.payload)
+
+    @staticmethod
+    def _validate_event_id(event_id: object) -> int:
+        if not isinstance(event_id, int) or isinstance(event_id, bool) or event_id < 1:
+            raise EventValidationError("Event id is invalid.")
+        return event_id
+
+    @staticmethod
+    def _validate_text(value: object, *, field: str, maximum_bytes: int | None = None) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise EventValidationError(f"Event {field} is invalid.")
+        if maximum_bytes is not None and len(value.encode("utf-8")) > maximum_bytes:
+            raise EventValidationError(f"Event {field} is too large.")
+        return value
+
+    @staticmethod
+    def _canonical_payload(payload: object) -> tuple[str, str]:
+        if not isinstance(payload, Mapping):
+            raise EventValidationError("Event payload must be an object.")
+        try:
+            source_payload = dict(payload)
+            canonical = json.dumps(
+                source_payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            decoded = json.loads(canonical)
+        except (RecursionError, TypeError, ValueError) as error:
+            raise EventValidationError("Event payload is invalid.") from error
+        if decoded != source_payload:
+            raise EventValidationError("Event payload is not JSON canonical.")
+        if len(canonical.encode("utf-8")) > 1_048_576:
+            raise EventValidationError("Event payload is too large.")
+        payload_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return canonical, payload_hash
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> EventRecord:
+        try:
+            event_id = cls._validate_event_id(row["id"])
+            job_id = cls._validate_text(row["job_id"], field="job_id")
+            sequence = row["sequence"]
+            if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1:
+                raise EventValidationError("Event sequence is invalid.")
+            event_type = cls._validate_text(
+                row["event_type"], field="event_type", maximum_bytes=128
+            )
+            stored_payload = row["payload"]
+            if not isinstance(stored_payload, str):
+                raise EventValidationError("Event payload is invalid.")
+            decoded_payload = json.loads(stored_payload)
+            canonical_payload, expected_hash = cls._canonical_payload(decoded_payload)
+            payload_hash = row["payload_hash"]
+            if canonical_payload != stored_payload or payload_hash != expected_hash:
+                raise EventValidationError("Event payload integrity check failed.")
+            created_at = row["created_at"]
+            if not isinstance(created_at, str) or not created_at:
+                raise EventValidationError("Event timestamp is invalid.")
+            return EventRecord(
+                id=event_id,
+                job_id=job_id,
+                sequence=sequence,
+                event_type=event_type,
+                payload=decoded_payload,
+                payload_hash=payload_hash,
+                created_at=created_at,
+            )
+        except (
+            IndexError,
+            KeyError,
+            EventValidationError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise EventRepositoryError("Stored event data is invalid.") from error
