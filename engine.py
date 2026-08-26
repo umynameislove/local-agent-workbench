@@ -5,6 +5,7 @@ import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -56,6 +57,12 @@ class JobRuntime(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
     LOCAL = "local"
+
+
+class ApprovalDecision(StrEnum):
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CHANGES_REQUESTED = "changes_requested"
 
 
 @dataclass(frozen=True)
@@ -169,6 +176,22 @@ class EventCreate:
     event_type: str
     payload: Mapping[str, Any]
     idempotency_key: str | None = None
+
+
+@dataclass(frozen=True)
+class ApprovalCreate:
+    id: str
+    job_id: str
+    payload: Mapping[str, Any]
+    expires_at: datetime
+
+
+@dataclass(frozen=True)
+class ApprovalResolution:
+    decision: ApprovalDecision
+    actor: str
+    channel: str
+    payload: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
