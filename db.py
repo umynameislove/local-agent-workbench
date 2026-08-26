@@ -3,13 +3,17 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from engine import (
+    ApprovalCreate,
+    ApprovalDecision,
+    ApprovalResolution,
     EventCreate,
     JobCreate,
     JobRuntime,
@@ -85,6 +89,34 @@ class EventIdempotencyConflictError(EventRepositoryError):
     """Raised when an idempotency key is reused for a different event."""
 
 
+class ApprovalRepositoryError(DatabaseError):
+    """Base error for safe approval persistence failures."""
+
+
+class ApprovalValidationError(ApprovalRepositoryError):
+    """Raised when approval data violates the persistence contract."""
+
+
+class ApprovalAlreadyExistsError(ApprovalRepositoryError):
+    """Raised when an approval id is already registered."""
+
+
+class ApprovalNotFoundError(ApprovalRepositoryError):
+    """Raised when a requested approval does not exist."""
+
+
+class ApprovalExpiredError(ApprovalRepositoryError):
+    """Raised when an expired approval is resolved."""
+
+
+class ApprovalPayloadMismatchError(ApprovalRepositoryError):
+    """Raised when the current payload differs from the approval request."""
+
+
+class ApprovalDecisionConflictError(ApprovalRepositoryError):
+    """Raised when a completed approval receives a conflicting retry."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -136,6 +168,19 @@ class EventRecord:
     payload_hash: str
     idempotency_key: str | None
     created_at: str
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    id: str
+    job_id: str
+    payload_hash: str
+    decision: ApprovalDecision | None
+    actor: str | None
+    channel: str | None
+    expires_at: datetime
+    created_at: str
+    decided_at: str | None
 
 
 MIGRATIONS = (
@@ -291,6 +336,101 @@ MIGRATIONS = (
             CREATE UNIQUE INDEX events_job_idempotency_idx
             ON events (job_id, idempotency_key)
             WHERE idempotency_key IS NOT NULL
+            """,
+        ),
+    ),
+    Migration(
+        version=6,
+        name="create_approvals",
+        statements=(
+            """
+            CREATE TABLE approvals (
+                id TEXT PRIMARY KEY CHECK (
+                    length(id) > 0
+                    AND length(CAST(id AS BLOB)) <= 128
+                    AND id = trim(id)
+                    AND instr(id, char(0)) = 0
+                ),
+                job_id TEXT NOT NULL
+                    REFERENCES jobs(id) ON DELETE RESTRICT,
+                payload_hash TEXT NOT NULL CHECK (
+                    length(payload_hash) = 64
+                    AND payload_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                decision TEXT CHECK (
+                    decision IS NULL OR decision IN (
+                        'approved', 'rejected', 'changes_requested'
+                    )
+                ),
+                actor TEXT CHECK (
+                    actor IS NULL OR (
+                        length(actor) > 0
+                        AND length(CAST(actor AS BLOB)) <= 128
+                        AND actor = trim(actor)
+                        AND instr(actor, char(0)) = 0
+                    )
+                ),
+                channel TEXT CHECK (
+                    channel IS NULL OR (
+                        length(channel) > 0
+                        AND length(CAST(channel AS BLOB)) <= 64
+                        AND channel = trim(channel)
+                        AND instr(channel, char(0)) = 0
+                    )
+                ),
+                expires_at INTEGER NOT NULL CHECK (expires_at > 0),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                decided_at TEXT,
+                CHECK (
+                    (
+                        decision IS NULL AND actor IS NULL
+                        AND channel IS NULL AND decided_at IS NULL
+                    ) OR (
+                        decision IS NOT NULL AND actor IS NOT NULL
+                        AND channel IS NOT NULL AND decided_at IS NOT NULL
+                    )
+                )
+            )
+            """,
+            """
+            CREATE INDEX approvals_job_created_idx
+            ON approvals (job_id, created_at, id)
+            """,
+            """
+            CREATE TRIGGER approvals_require_pending_insert
+            BEFORE INSERT ON approvals
+            WHEN NEW.decision IS NOT NULL
+                OR NEW.actor IS NOT NULL
+                OR NEW.channel IS NOT NULL
+                OR NEW.decided_at IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Approval must begin pending.');
+            END
+            """,
+            """
+            CREATE TRIGGER approvals_validate_decision
+            BEFORE UPDATE ON approvals
+            WHEN OLD.decision IS NOT NULL
+                OR NEW.id IS NOT OLD.id
+                OR NEW.job_id IS NOT OLD.job_id
+                OR NEW.payload_hash IS NOT OLD.payload_hash
+                OR NEW.expires_at IS NOT OLD.expires_at
+                OR NEW.created_at IS NOT OLD.created_at
+                OR NEW.decision IS NULL
+                OR NEW.actor IS NULL
+                OR NEW.channel IS NULL
+                OR NEW.decided_at IS NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Approval decision is immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER approvals_prevent_delete
+            BEFORE DELETE ON approvals
+            BEGIN
+                SELECT RAISE(ABORT, 'Approval records are immutable.');
+            END
             """,
         ),
     ),
@@ -1051,3 +1191,312 @@ class EventRepository(_Repository):
             ValueError,
         ) as error:
             raise EventRepositoryError("Stored event data is invalid.") from error
+
+
+class ApprovalRepository(_Repository):
+    error_type = ApprovalRepositoryError
+    storage_name = "Approval"
+    _epoch = datetime(1970, 1, 1, tzinfo=UTC)
+
+    def __init__(
+        self,
+        database: Database,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        super().__init__(database)
+        self.clock = clock or self._utc_now
+
+    def create(self, approval: ApprovalCreate) -> ApprovalRecord:
+        payload_hash, expires_at_us = self._validate_approval(approval)
+        with self._write_connection() as connection:
+            _, now_us = self._read_clock()
+            if expires_at_us <= now_us:
+                raise ApprovalExpiredError("Approval expiry must be in the future.")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO approvals (
+                        id, job_id, payload_hash, expires_at
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (approval.id, approval.job_id, payload_hash, expires_at_us),
+                )
+                row = self._select_by_id(connection, approval.id)
+                if row is None:
+                    raise ApprovalRepositoryError("Approval could not be created.")
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                error_name = getattr(error, "sqlite_errorname", "")
+                if error_name in {
+                    "SQLITE_CONSTRAINT_PRIMARYKEY",
+                    "SQLITE_CONSTRAINT_UNIQUE",
+                }:
+                    raise ApprovalAlreadyExistsError(
+                        "An approval with this id already exists."
+                    ) from error
+                if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise ApprovalValidationError("Approval job does not exist.") from error
+                raise ApprovalRepositoryError("Approval could not be created.") from error
+        return stored
+
+    def decide(
+        self,
+        approval_id: str,
+        resolution: ApprovalResolution,
+    ) -> ApprovalRecord:
+        normalized_id = self._validate_text(approval_id, field="id", maximum_bytes=128)
+        payload_hash = self._validate_resolution(resolution)
+        with self._write_connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+            if row is None:
+                raise ApprovalNotFoundError("Approval does not exist.")
+            stored = self._to_record(row)
+            if stored.payload_hash != payload_hash:
+                raise ApprovalPayloadMismatchError(
+                    "Approval payload does not match the requested action."
+                )
+            if stored.decision is not None:
+                if (
+                    stored.decision == resolution.decision
+                    and stored.actor == resolution.actor
+                    and stored.channel == resolution.channel
+                ):
+                    return stored
+                raise ApprovalDecisionConflictError("Approval already has a different decision.")
+            now, now_us = self._read_clock()
+            if now_us >= self._datetime_to_epoch_us(stored.expires_at):
+                raise ApprovalExpiredError("Approval has expired.")
+            try:
+                result = connection.execute(
+                    """
+                    UPDATE approvals
+                    SET decision = ?, actor = ?, channel = ?, decided_at = ?
+                    WHERE id = ? AND decision IS NULL
+                    """,
+                    (
+                        resolution.decision.value,
+                        resolution.actor,
+                        resolution.channel,
+                        self._format_timestamp(now),
+                        normalized_id,
+                    ),
+                )
+                if result.rowcount != 1:
+                    raise ApprovalDecisionConflictError("Approval decision could not be recorded.")
+                decided = self._select_by_id(connection, normalized_id)
+                if decided is None:
+                    raise ApprovalRepositoryError("Approval decision could not be recorded.")
+                stored = self._to_record(decided)
+            except sqlite3.IntegrityError as error:
+                raise ApprovalRepositoryError("Approval decision could not be recorded.") from error
+        return stored
+
+    def get(self, approval_id: str) -> ApprovalRecord:
+        normalized_id = self._validate_text(approval_id, field="id", maximum_bytes=128)
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise ApprovalNotFoundError("Approval does not exist.")
+        return self._to_record(row)
+
+    def list(self, *, job_id: str | None = None) -> tuple[ApprovalRecord, ...]:
+        parameters: tuple[str, ...] = ()
+        where = ""
+        if job_id is not None:
+            parameters = (self._validate_text(job_id, field="job_id"),)
+            where = "WHERE job_id = ?"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, job_id, payload_hash, decision, actor, channel,
+                       expires_at, created_at, decided_at
+                FROM approvals
+                {where}
+                ORDER BY created_at, id
+                """,
+                parameters,
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(connection: sqlite3.Connection, approval_id: str) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, job_id, payload_hash, decision, actor, channel,
+                   expires_at, created_at, decided_at
+            FROM approvals
+            WHERE id = ?
+            """,
+            (approval_id,),
+        ).fetchone()
+
+    @classmethod
+    def _validate_approval(cls, approval: ApprovalCreate) -> tuple[str, int]:
+        if not isinstance(approval, ApprovalCreate):
+            raise ApprovalValidationError("Approval must use the supported creation contract.")
+        cls._validate_text(approval.id, field="id", maximum_bytes=128)
+        cls._validate_text(approval.job_id, field="job_id")
+        payload_hash = cls._payload_hash(approval.payload)
+        expires_at = cls._normalize_datetime(approval.expires_at, field="expires_at")
+        return payload_hash, cls._datetime_to_epoch_us(expires_at)
+
+    @classmethod
+    def _validate_resolution(cls, resolution: ApprovalResolution) -> str:
+        if not isinstance(resolution, ApprovalResolution):
+            raise ApprovalValidationError("Approval must use the supported resolution contract.")
+        if not isinstance(resolution.decision, ApprovalDecision):
+            raise ApprovalValidationError("Approval decision is invalid.")
+        cls._validate_text(resolution.actor, field="actor", maximum_bytes=128)
+        cls._validate_text(resolution.channel, field="channel", maximum_bytes=64)
+        return cls._payload_hash(resolution.payload)
+
+    @staticmethod
+    def _validate_text(
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int | None = None,
+    ) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise ApprovalValidationError(f"Approval {field} is invalid.")
+        if maximum_bytes is not None and len(value.encode("utf-8")) > maximum_bytes:
+            raise ApprovalValidationError(f"Approval {field} is too large.")
+        return value
+
+    @staticmethod
+    def _validate_optional_text(
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int,
+    ) -> str | None:
+        if value is None:
+            return None
+        return ApprovalRepository._validate_text(value, field=field, maximum_bytes=maximum_bytes)
+
+    @staticmethod
+    def _payload_hash(payload: object) -> str:
+        if not isinstance(payload, Mapping):
+            raise ApprovalValidationError("Approval payload must be an object.")
+        try:
+            source_payload = dict(payload)
+            canonical = json.dumps(
+                source_payload,
+                allow_nan=False,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+            decoded = json.loads(canonical)
+        except (RecursionError, TypeError, ValueError) as error:
+            raise ApprovalValidationError("Approval payload is invalid.") from error
+        if decoded != source_payload:
+            raise ApprovalValidationError("Approval payload is not JSON canonical.")
+        if len(canonical.encode("utf-8")) > 1_048_576:
+            raise ApprovalValidationError("Approval payload is too large.")
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _normalize_datetime(cls, value: object, *, field: str) -> datetime:
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise ApprovalValidationError(f"Approval {field} must include a timezone.")
+        try:
+            offset = value.utcoffset()
+            normalized = value.astimezone(UTC)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ApprovalValidationError(f"Approval {field} is invalid.") from error
+        if offset is None or normalized <= cls._epoch:
+            raise ApprovalValidationError(f"Approval {field} is invalid.")
+        return normalized
+
+    @classmethod
+    def _datetime_to_epoch_us(cls, value: datetime) -> int:
+        normalized = cls._normalize_datetime(value, field="timestamp")
+        delta = normalized - cls._epoch
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    @classmethod
+    def _epoch_us_to_datetime(cls, value: object) -> datetime:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ApprovalValidationError("Approval expiry is invalid.")
+        try:
+            return cls._epoch + timedelta(microseconds=value)
+        except OverflowError as error:
+            raise ApprovalValidationError("Approval expiry is invalid.") from error
+
+    @classmethod
+    def _validate_timestamp(cls, value: object, *, field: str) -> str:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise ApprovalValidationError(f"Approval {field} is invalid.")
+        try:
+            parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+        except ValueError as error:
+            raise ApprovalValidationError(f"Approval {field} is invalid.") from error
+        cls._normalize_datetime(parsed, field=field)
+        return value
+
+    def _read_clock(self) -> tuple[datetime, int]:
+        try:
+            now = self._normalize_datetime(self.clock(), field="clock")
+        except ApprovalValidationError as error:
+            raise ApprovalRepositoryError("Approval clock is invalid.") from error
+        return now, self._datetime_to_epoch_us(now)
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)
+
+    @staticmethod
+    def _format_timestamp(value: datetime) -> str:
+        return value.astimezone(UTC).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> ApprovalRecord:
+        try:
+            approval_id = cls._validate_text(row["id"], field="id", maximum_bytes=128)
+            job_id = cls._validate_text(row["job_id"], field="job_id")
+            payload_hash = row["payload_hash"]
+            if (
+                not isinstance(payload_hash, str)
+                or len(payload_hash) != 64
+                or any(character not in "0123456789abcdef" for character in payload_hash)
+            ):
+                raise ApprovalValidationError("Approval payload hash is invalid.")
+            raw_decision = row["decision"]
+            decision = None if raw_decision is None else ApprovalDecision(raw_decision)
+            actor = cls._validate_optional_text(row["actor"], field="actor", maximum_bytes=128)
+            channel = cls._validate_optional_text(row["channel"], field="channel", maximum_bytes=64)
+            expires_at = cls._epoch_us_to_datetime(row["expires_at"])
+            created_at = cls._validate_timestamp(row["created_at"], field="created_at")
+            decided_at_value = row["decided_at"]
+            decided_at = (
+                None
+                if decided_at_value is None
+                else cls._validate_timestamp(decided_at_value, field="decided_at")
+            )
+            if decision is None:
+                if actor is not None or channel is not None or decided_at is not None:
+                    raise ApprovalValidationError("Approval decision state is invalid.")
+            elif actor is None or channel is None or decided_at is None:
+                raise ApprovalValidationError("Approval decision state is invalid.")
+            return ApprovalRecord(
+                id=approval_id,
+                job_id=job_id,
+                payload_hash=payload_hash,
+                decision=decision,
+                actor=actor,
+                channel=channel,
+                expires_at=expires_at,
+                created_at=created_at,
+                decided_at=decided_at,
+            )
+        except (
+            IndexError,
+            KeyError,
+            ApprovalValidationError,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise ApprovalRepositoryError("Stored approval data is invalid.") from error
