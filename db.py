@@ -20,6 +20,8 @@ from engine import (
     JobState,
     JobUpdate,
     PermissionMode,
+    PlannerItemCreate,
+    PlannerItemKind,
     ProjectConfig,
     Sensitivity,
 )
@@ -117,6 +119,26 @@ class ApprovalDecisionConflictError(ApprovalRepositoryError):
     """Raised when a completed approval receives a conflicting retry."""
 
 
+class PlannerRepositoryError(DatabaseError):
+    """Base error for safe planner persistence failures."""
+
+
+class PlannerValidationError(PlannerRepositoryError):
+    """Raised when planner data violates the persistence contract."""
+
+
+class PlannerAlreadyExistsError(PlannerRepositoryError):
+    """Raised when a planner item id is already registered."""
+
+
+class PlannerNotFoundError(PlannerRepositoryError):
+    """Raised when a requested planner item does not exist."""
+
+
+class PlannerPromotionConflictError(PlannerRepositoryError):
+    """Raised when a planner item receives a conflicting promotion."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -181,6 +203,28 @@ class ApprovalRecord:
     expires_at: datetime
     created_at: str
     decided_at: str | None
+
+
+@dataclass(frozen=True)
+class PlannerItemRecord:
+    id: str
+    kind: PlannerItemKind
+    title: str
+    project_id: str | None
+    details: str | None
+    due_at: datetime | None
+    source: str | None
+    source_key: str | None
+    promoted_job_id: str | None
+    created_at: str
+    updated_at: str
+    promoted_at: str | None
+
+
+@dataclass(frozen=True)
+class PlannerPromotionRecord:
+    item: PlannerItemRecord
+    job: JobRecord
 
 
 MIGRATIONS = (
@@ -430,6 +474,119 @@ MIGRATIONS = (
             BEFORE DELETE ON approvals
             BEGIN
                 SELECT RAISE(ABORT, 'Approval records are immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=7,
+        name="create_planner",
+        statements=(
+            """
+            CREATE TABLE planner (
+                id TEXT PRIMARY KEY CHECK (
+                    length(id) > 0
+                    AND length(CAST(id AS BLOB)) <= 128
+                    AND id = trim(id)
+                    AND instr(id, char(0)) = 0
+                ),
+                kind TEXT NOT NULL CHECK (
+                    kind IN ('deadline', 'blocker', 'watcher')
+                ),
+                project_id TEXT
+                    REFERENCES projects(id) ON DELETE RESTRICT,
+                title TEXT NOT NULL CHECK (
+                    length(trim(title)) > 0
+                    AND length(CAST(title AS BLOB)) <= 4096
+                    AND title = trim(title)
+                    AND instr(title, char(0)) = 0
+                ),
+                details TEXT CHECK (
+                    details IS NULL OR (
+                        length(trim(details)) > 0
+                        AND length(CAST(details AS BLOB)) <= 262144
+                        AND instr(details, char(0)) = 0
+                    )
+                ),
+                due_at INTEGER CHECK (due_at IS NULL OR due_at > 0),
+                source TEXT CHECK (
+                    source IS NULL OR (
+                        length(source) > 0
+                        AND length(CAST(source AS BLOB)) <= 128
+                        AND source = trim(source)
+                        AND instr(source, char(0)) = 0
+                    )
+                ),
+                source_key TEXT CHECK (
+                    source_key IS NULL OR (
+                        length(source_key) > 0
+                        AND length(CAST(source_key AS BLOB)) <= 512
+                        AND source_key = trim(source_key)
+                        AND instr(source_key, char(0)) = 0
+                    )
+                ),
+                promoted_job_id TEXT
+                    REFERENCES jobs(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                promoted_at TEXT,
+                CHECK (kind != 'deadline' OR due_at IS NOT NULL),
+                CHECK (kind != 'watcher' OR source IS NOT NULL),
+                CHECK (source_key IS NULL OR source IS NOT NULL),
+                CHECK (
+                    (promoted_job_id IS NULL AND promoted_at IS NULL)
+                    OR (promoted_job_id IS NOT NULL AND promoted_at IS NOT NULL)
+                )
+            )
+            """,
+            """
+            CREATE INDEX planner_project_created_idx
+            ON planner (project_id, created_at, id)
+            """,
+            """
+            CREATE INDEX planner_kind_due_idx
+            ON planner (kind, due_at, created_at, id)
+            """,
+            """
+            CREATE UNIQUE INDEX planner_promoted_job_idx
+            ON planner (promoted_job_id)
+            WHERE promoted_job_id IS NOT NULL
+            """,
+            """
+            CREATE TRIGGER planner_require_pending_insert
+            BEFORE INSERT ON planner
+            WHEN NEW.promoted_job_id IS NOT NULL OR NEW.promoted_at IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Planner item must begin pending.');
+            END
+            """,
+            """
+            CREATE TRIGGER planner_validate_promotion
+            BEFORE UPDATE ON planner
+            WHEN OLD.promoted_job_id IS NOT NULL
+                OR NEW.id IS NOT OLD.id
+                OR NEW.kind IS NOT OLD.kind
+                OR NEW.project_id IS NOT OLD.project_id
+                OR NEW.title IS NOT OLD.title
+                OR NEW.details IS NOT OLD.details
+                OR NEW.due_at IS NOT OLD.due_at
+                OR NEW.source IS NOT OLD.source
+                OR NEW.source_key IS NOT OLD.source_key
+                OR NEW.created_at IS NOT OLD.created_at
+                OR NEW.promoted_job_id IS NULL
+                OR NEW.promoted_at IS NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Planner promotion is immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER planner_protect_promoted_delete
+            BEFORE DELETE ON planner
+            WHEN OLD.promoted_job_id IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Promoted planner items are immutable.');
             END
             """,
         ),
@@ -783,28 +940,7 @@ class JobRepository(_Repository):
         snapshot = self._validate_job(job)
         with self._write_connection() as connection:
             try:
-                connection.execute(
-                    """
-                    INSERT INTO jobs (
-                        id, project_id, request, request_snapshot, state,
-                        runtime, model, worktree_path
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        job.id,
-                        job.project_id,
-                        job.request,
-                        snapshot,
-                        job.state.value,
-                        job.runtime.value,
-                        job.model,
-                        job.worktree_path,
-                    ),
-                )
-                row = self._select_by_id(connection, job.id)
-                if row is None:
-                    raise JobRepositoryError("Job could not be created.")
-                stored = self._to_record(row)
+                stored = self._insert(connection, job, snapshot)
             except sqlite3.IntegrityError as error:
                 error_name = getattr(error, "sqlite_errorname", "")
                 if error_name in {"SQLITE_CONSTRAINT_PRIMARYKEY", "SQLITE_CONSTRAINT_UNIQUE"}:
@@ -860,6 +996,36 @@ class JobRepository(_Repository):
                 parameters,
             ).fetchall()
         return tuple(self._to_record(row) for row in rows)
+
+    @classmethod
+    def _insert(
+        cls,
+        connection: sqlite3.Connection,
+        job: JobCreate,
+        snapshot: str,
+    ) -> JobRecord:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                id, project_id, request, request_snapshot, state,
+                runtime, model, worktree_path
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.id,
+                job.project_id,
+                job.request,
+                snapshot,
+                job.state.value,
+                job.runtime.value,
+                job.model,
+                job.worktree_path,
+            ),
+        )
+        row = cls._select_by_id(connection, job.id)
+        if row is None:
+            raise JobRepositoryError("Job could not be created.")
+        return cls._to_record(row)
 
     @staticmethod
     def _select_by_id(connection: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
@@ -1500,3 +1666,350 @@ class ApprovalRepository(_Repository):
             ValueError,
         ) as error:
             raise ApprovalRepositoryError("Stored approval data is invalid.") from error
+
+
+class PlannerRepository(_Repository):
+    error_type = PlannerRepositoryError
+    storage_name = "Planner"
+    _epoch = datetime(1970, 1, 1, tzinfo=UTC)
+
+    def create(self, item: PlannerItemCreate) -> PlannerItemRecord:
+        due_at_us = self._validate_item(item)
+        with self._write_connection() as connection:
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO planner (
+                        id, kind, project_id, title, details, due_at,
+                        source, source_key
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item.id,
+                        item.kind.value,
+                        item.project_id,
+                        item.title,
+                        item.details,
+                        due_at_us,
+                        item.source,
+                        item.source_key,
+                    ),
+                )
+                row = self._select_by_id(connection, item.id)
+                if row is None:
+                    raise PlannerRepositoryError("Planner item could not be created.")
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                error_name = getattr(error, "sqlite_errorname", "")
+                if error_name in {
+                    "SQLITE_CONSTRAINT_PRIMARYKEY",
+                    "SQLITE_CONSTRAINT_UNIQUE",
+                }:
+                    raise PlannerAlreadyExistsError(
+                        "A planner item with this id already exists."
+                    ) from error
+                if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise PlannerValidationError("Planner item project does not exist.") from error
+                raise PlannerRepositoryError("Planner item could not be created.") from error
+        return stored
+
+    def promote(self, item_id: str, job: JobCreate) -> PlannerPromotionRecord:
+        normalized_id = self._validate_text(item_id, field="id", maximum_bytes=128)
+        try:
+            snapshot = JobRepository._validate_job(job)
+        except JobValidationError as error:
+            raise PlannerValidationError("Planner promotion job is invalid.") from error
+
+        with self._write_connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+            if row is None:
+                raise PlannerNotFoundError("Planner item does not exist.")
+            item = self._to_record(row)
+            if item.promoted_job_id is not None:
+                return self._resolve_retry(connection, item, job, snapshot)
+            if item.project_id is not None and item.project_id != job.project_id:
+                raise PlannerValidationError("Planner promotion job must use the item project.")
+
+            try:
+                created_job = JobRepository._insert(connection, job, snapshot)
+                result = connection.execute(
+                    """
+                    UPDATE planner
+                    SET promoted_job_id = ?,
+                        promoted_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'),
+                        updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+                    WHERE id = ? AND promoted_job_id IS NULL
+                    """,
+                    (job.id, normalized_id),
+                )
+                if result.rowcount != 1:
+                    raise PlannerPromotionConflictError("Planner item could not be promoted.")
+                promoted_row = self._select_by_id(connection, normalized_id)
+                if promoted_row is None:
+                    raise PlannerRepositoryError("Planner promotion could not be recorded.")
+                promoted = self._to_record(promoted_row)
+            except sqlite3.IntegrityError as error:
+                error_name = getattr(error, "sqlite_errorname", "")
+                if error_name in {
+                    "SQLITE_CONSTRAINT_PRIMARYKEY",
+                    "SQLITE_CONSTRAINT_UNIQUE",
+                }:
+                    raise PlannerPromotionConflictError(
+                        "Planner promotion conflicts with an existing job."
+                    ) from error
+                if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise PlannerValidationError(
+                        "Planner promotion project does not exist."
+                    ) from error
+                raise PlannerRepositoryError("Planner item could not be promoted.") from error
+            except JobRepositoryError as error:
+                raise PlannerRepositoryError("Stored promotion job data is invalid.") from error
+        return PlannerPromotionRecord(item=promoted, job=created_job)
+
+    def get(self, item_id: str) -> PlannerItemRecord:
+        normalized_id = self._validate_text(item_id, field="id", maximum_bytes=128)
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise PlannerNotFoundError("Planner item does not exist.")
+        return self._to_record(row)
+
+    def list(
+        self,
+        *,
+        kind: PlannerItemKind | None = None,
+        project_id: str | None = None,
+        promoted: bool | None = None,
+    ) -> tuple[PlannerItemRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[str] = []
+        if kind is not None:
+            if not isinstance(kind, PlannerItemKind):
+                raise PlannerValidationError("Planner item kind is invalid.")
+            clauses.append("kind = ?")
+            parameters.append(kind.value)
+        if project_id is not None:
+            clauses.append("project_id = ?")
+            parameters.append(self._validate_text(project_id, field="project_id"))
+        if promoted is not None:
+            if not isinstance(promoted, bool):
+                raise PlannerValidationError("Planner promoted filter is invalid.")
+            clauses.append("promoted_job_id IS NOT NULL" if promoted else "promoted_job_id IS NULL")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, kind, project_id, title, details, due_at,
+                       source, source_key, promoted_job_id, created_at,
+                       updated_at, promoted_at
+                FROM planner
+                {where}
+                ORDER BY due_at IS NULL, due_at, created_at, id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(connection: sqlite3.Connection, item_id: str) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, kind, project_id, title, details, due_at,
+                   source, source_key, promoted_job_id, created_at,
+                   updated_at, promoted_at
+            FROM planner
+            WHERE id = ?
+            """,
+            (item_id,),
+        ).fetchone()
+
+    @classmethod
+    def _validate_item(cls, item: PlannerItemCreate) -> int | None:
+        if not isinstance(item, PlannerItemCreate):
+            raise PlannerValidationError("Planner item must use the supported creation contract.")
+        cls._validate_text(item.id, field="id", maximum_bytes=128)
+        if not isinstance(item.kind, PlannerItemKind):
+            raise PlannerValidationError("Planner item kind is invalid.")
+        cls._validate_text(item.title, field="title", maximum_bytes=4096)
+        cls._validate_optional_text(item.project_id, field="project_id")
+        cls._validate_optional_content(item.details, field="details", maximum_bytes=262_144)
+        cls._validate_optional_text(item.source, field="source", maximum_bytes=128)
+        cls._validate_optional_text(item.source_key, field="source_key", maximum_bytes=512)
+        if item.source_key is not None and item.source is None:
+            raise PlannerValidationError("Planner source key requires a source.")
+        if item.kind is PlannerItemKind.WATCHER and item.source is None:
+            raise PlannerValidationError("Watcher items require a source.")
+        if item.kind is PlannerItemKind.DEADLINE and item.due_at is None:
+            raise PlannerValidationError("Deadline items require a due time.")
+        if item.due_at is None:
+            return None
+        return cls._datetime_to_epoch_us(cls._normalize_datetime(item.due_at, field="due_at"))
+
+    @classmethod
+    def _resolve_retry(
+        cls,
+        connection: sqlite3.Connection,
+        item: PlannerItemRecord,
+        job: JobCreate,
+        snapshot: str,
+    ) -> PlannerPromotionRecord:
+        if item.promoted_job_id != job.id:
+            raise PlannerPromotionConflictError("Planner item already has a different promotion.")
+        row = JobRepository._select_by_id(connection, job.id)
+        if row is None:
+            raise PlannerRepositoryError("Stored promotion job is unavailable.")
+        try:
+            stored_job = JobRepository._to_record(row)
+        except JobRepositoryError as error:
+            raise PlannerRepositoryError("Stored promotion job data is invalid.") from error
+        if not cls._job_matches(stored_job, job, snapshot):
+            raise PlannerPromotionConflictError("Planner promotion conflicts with stored job data.")
+        return PlannerPromotionRecord(item=item, job=stored_job)
+
+    @staticmethod
+    def _job_matches(stored: JobRecord, requested: JobCreate, snapshot: str) -> bool:
+        return (
+            stored.id == requested.id
+            and stored.project_id == requested.project_id
+            and stored.request == requested.request
+            and stored.request_snapshot == json.loads(snapshot)
+            and stored.state == requested.state
+            and stored.runtime == requested.runtime
+            and stored.model == requested.model
+            and stored.worktree_path == requested.worktree_path
+        )
+
+    @staticmethod
+    def _validate_text(
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int | None = None,
+    ) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise PlannerValidationError(f"Planner {field} is invalid.")
+        if maximum_bytes is not None and len(value.encode("utf-8")) > maximum_bytes:
+            raise PlannerValidationError(f"Planner {field} is too large.")
+        return value
+
+    @classmethod
+    def _validate_optional_text(
+        cls,
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int | None = None,
+    ) -> str | None:
+        if value is None:
+            return None
+        return cls._validate_text(value, field=field, maximum_bytes=maximum_bytes)
+
+    @staticmethod
+    def _validate_optional_content(
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int,
+    ) -> str | None:
+        if value is None:
+            return None
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or "\x00" in value
+            or len(value.encode("utf-8")) > maximum_bytes
+        ):
+            raise PlannerValidationError(f"Planner {field} is invalid.")
+        return value
+
+    @classmethod
+    def _normalize_datetime(cls, value: object, *, field: str) -> datetime:
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise PlannerValidationError(f"Planner {field} must include a timezone.")
+        try:
+            offset = value.utcoffset()
+            normalized = value.astimezone(UTC)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise PlannerValidationError(f"Planner {field} is invalid.") from error
+        if offset is None or normalized <= cls._epoch:
+            raise PlannerValidationError(f"Planner {field} is invalid.")
+        return normalized
+
+    @classmethod
+    def _datetime_to_epoch_us(cls, value: datetime) -> int:
+        normalized = cls._normalize_datetime(value, field="timestamp")
+        delta = normalized - cls._epoch
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    @classmethod
+    def _epoch_us_to_datetime(cls, value: object) -> datetime:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise PlannerValidationError("Planner due time is invalid.")
+        try:
+            return cls._epoch + timedelta(microseconds=value)
+        except OverflowError as error:
+            raise PlannerValidationError("Planner due time is invalid.") from error
+
+    @classmethod
+    def _validate_timestamp(cls, value: object, *, field: str) -> str:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise PlannerValidationError(f"Planner {field} is invalid.")
+        try:
+            parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+        except ValueError as error:
+            raise PlannerValidationError(f"Planner {field} is invalid.") from error
+        cls._normalize_datetime(parsed, field=field)
+        return value
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> PlannerItemRecord:
+        try:
+            due_at_value = row["due_at"]
+            due_at = None if due_at_value is None else cls._epoch_us_to_datetime(due_at_value)
+            item = PlannerItemCreate(
+                id=row["id"],
+                kind=PlannerItemKind(row["kind"]),
+                title=row["title"],
+                project_id=row["project_id"],
+                details=row["details"],
+                due_at=due_at,
+                source=row["source"],
+                source_key=row["source_key"],
+            )
+            cls._validate_item(item)
+            promoted_job_id = cls._validate_optional_text(
+                row["promoted_job_id"], field="promoted_job_id"
+            )
+            created_at = cls._validate_timestamp(row["created_at"], field="created_at")
+            updated_at = cls._validate_timestamp(row["updated_at"], field="updated_at")
+            promoted_at_value = row["promoted_at"]
+            promoted_at = (
+                None
+                if promoted_at_value is None
+                else cls._validate_timestamp(promoted_at_value, field="promoted_at")
+            )
+            if (promoted_job_id is None) != (promoted_at is None):
+                raise PlannerValidationError("Planner promotion state is invalid.")
+            return PlannerItemRecord(
+                id=item.id,
+                kind=item.kind,
+                title=item.title,
+                project_id=item.project_id,
+                details=item.details,
+                due_at=item.due_at,
+                source=item.source,
+                source_key=item.source_key,
+                promoted_job_id=promoted_job_id,
+                created_at=created_at,
+                updated_at=updated_at,
+                promoted_at=promoted_at,
+            )
+        except (
+            IndexError,
+            KeyError,
+            PlannerValidationError,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ) as error:
+            raise PlannerRepositoryError("Stored planner data is invalid.") from error

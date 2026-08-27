@@ -65,6 +65,12 @@ class ApprovalDecision(StrEnum):
     CHANGES_REQUESTED = "changes_requested"
 
 
+class PlannerItemKind(StrEnum):
+    DEADLINE = "deadline"
+    BLOCKER = "blocker"
+    WATCHER = "watcher"
+
+
 @dataclass(frozen=True)
 class RuntimeHome:
     root: Path
@@ -192,6 +198,18 @@ class ApprovalResolution:
     actor: str
     channel: str
     payload: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class PlannerItemCreate:
+    id: str
+    kind: PlannerItemKind
+    title: str
+    project_id: str | None = None
+    details: str | None = None
+    due_at: datetime | None = None
+    source: str | None = None
+    source_key: str | None = None
 
 
 @dataclass(frozen=True)
