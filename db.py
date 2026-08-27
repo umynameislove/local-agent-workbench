@@ -20,6 +20,8 @@ from engine import (
     JobState,
     JobUpdate,
     PermissionMode,
+    PlannerItemCreate,
+    PlannerItemKind,
     ProjectConfig,
     Sensitivity,
 )
@@ -117,6 +119,26 @@ class ApprovalDecisionConflictError(ApprovalRepositoryError):
     """Raised when a completed approval receives a conflicting retry."""
 
 
+class PlannerRepositoryError(DatabaseError):
+    """Base error for safe planner persistence failures."""
+
+
+class PlannerValidationError(PlannerRepositoryError):
+    """Raised when planner data violates the persistence contract."""
+
+
+class PlannerAlreadyExistsError(PlannerRepositoryError):
+    """Raised when a planner item id is already registered."""
+
+
+class PlannerNotFoundError(PlannerRepositoryError):
+    """Raised when a requested planner item does not exist."""
+
+
+class PlannerPromotionConflictError(PlannerRepositoryError):
+    """Raised when a planner item receives a conflicting promotion."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -181,6 +203,28 @@ class ApprovalRecord:
     expires_at: datetime
     created_at: str
     decided_at: str | None
+
+
+@dataclass(frozen=True)
+class PlannerItemRecord:
+    id: str
+    kind: PlannerItemKind
+    title: str
+    project_id: str | None
+    details: str | None
+    due_at: datetime | None
+    source: str | None
+    source_key: str | None
+    promoted_job_id: str | None
+    created_at: str
+    updated_at: str
+    promoted_at: str | None
+
+
+@dataclass(frozen=True)
+class PlannerPromotionRecord:
+    item: PlannerItemRecord
+    job: JobRecord
 
 
 MIGRATIONS = (
@@ -430,6 +474,119 @@ MIGRATIONS = (
             BEFORE DELETE ON approvals
             BEGIN
                 SELECT RAISE(ABORT, 'Approval records are immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=7,
+        name="create_planner",
+        statements=(
+            """
+            CREATE TABLE planner (
+                id TEXT PRIMARY KEY CHECK (
+                    length(id) > 0
+                    AND length(CAST(id AS BLOB)) <= 128
+                    AND id = trim(id)
+                    AND instr(id, char(0)) = 0
+                ),
+                kind TEXT NOT NULL CHECK (
+                    kind IN ('deadline', 'blocker', 'watcher')
+                ),
+                project_id TEXT
+                    REFERENCES projects(id) ON DELETE RESTRICT,
+                title TEXT NOT NULL CHECK (
+                    length(trim(title)) > 0
+                    AND length(CAST(title AS BLOB)) <= 4096
+                    AND title = trim(title)
+                    AND instr(title, char(0)) = 0
+                ),
+                details TEXT CHECK (
+                    details IS NULL OR (
+                        length(trim(details)) > 0
+                        AND length(CAST(details AS BLOB)) <= 262144
+                        AND instr(details, char(0)) = 0
+                    )
+                ),
+                due_at INTEGER CHECK (due_at IS NULL OR due_at > 0),
+                source TEXT CHECK (
+                    source IS NULL OR (
+                        length(source) > 0
+                        AND length(CAST(source AS BLOB)) <= 128
+                        AND source = trim(source)
+                        AND instr(source, char(0)) = 0
+                    )
+                ),
+                source_key TEXT CHECK (
+                    source_key IS NULL OR (
+                        length(source_key) > 0
+                        AND length(CAST(source_key AS BLOB)) <= 512
+                        AND source_key = trim(source_key)
+                        AND instr(source_key, char(0)) = 0
+                    )
+                ),
+                promoted_job_id TEXT
+                    REFERENCES jobs(id) ON DELETE RESTRICT,
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                updated_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                promoted_at TEXT,
+                CHECK (kind != 'deadline' OR due_at IS NOT NULL),
+                CHECK (kind != 'watcher' OR source IS NOT NULL),
+                CHECK (source_key IS NULL OR source IS NOT NULL),
+                CHECK (
+                    (promoted_job_id IS NULL AND promoted_at IS NULL)
+                    OR (promoted_job_id IS NOT NULL AND promoted_at IS NOT NULL)
+                )
+            )
+            """,
+            """
+            CREATE INDEX planner_project_created_idx
+            ON planner (project_id, created_at, id)
+            """,
+            """
+            CREATE INDEX planner_kind_due_idx
+            ON planner (kind, due_at, created_at, id)
+            """,
+            """
+            CREATE UNIQUE INDEX planner_promoted_job_idx
+            ON planner (promoted_job_id)
+            WHERE promoted_job_id IS NOT NULL
+            """,
+            """
+            CREATE TRIGGER planner_require_pending_insert
+            BEFORE INSERT ON planner
+            WHEN NEW.promoted_job_id IS NOT NULL OR NEW.promoted_at IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Planner item must begin pending.');
+            END
+            """,
+            """
+            CREATE TRIGGER planner_validate_promotion
+            BEFORE UPDATE ON planner
+            WHEN OLD.promoted_job_id IS NOT NULL
+                OR NEW.id IS NOT OLD.id
+                OR NEW.kind IS NOT OLD.kind
+                OR NEW.project_id IS NOT OLD.project_id
+                OR NEW.title IS NOT OLD.title
+                OR NEW.details IS NOT OLD.details
+                OR NEW.due_at IS NOT OLD.due_at
+                OR NEW.source IS NOT OLD.source
+                OR NEW.source_key IS NOT OLD.source_key
+                OR NEW.created_at IS NOT OLD.created_at
+                OR NEW.promoted_job_id IS NULL
+                OR NEW.promoted_at IS NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Planner promotion is immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER planner_protect_promoted_delete
+            BEFORE DELETE ON planner
+            WHEN OLD.promoted_job_id IS NOT NULL
+            BEGIN
+                SELECT RAISE(ABORT, 'Promoted planner items are immutable.');
             END
             """,
         ),
