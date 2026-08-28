@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from engine import (
     PlannerItemKind,
     ProjectConfig,
     Sensitivity,
+    UsageCreate,
 )
 
 
@@ -139,6 +141,18 @@ class PlannerPromotionConflictError(PlannerRepositoryError):
     """Raised when a planner item receives a conflicting promotion."""
 
 
+class UsageRepositoryError(DatabaseError):
+    """Base error for safe usage persistence failures."""
+
+
+class UsageValidationError(UsageRepositoryError):
+    """Raised when usage data violates the persistence contract."""
+
+
+class UsageNotFoundError(UsageRepositoryError):
+    """Raised when a requested usage observation does not exist."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -225,6 +239,24 @@ class PlannerItemRecord:
 class PlannerPromotionRecord:
     item: PlannerItemRecord
     job: JobRecord
+
+
+@dataclass(frozen=True)
+class UsageRecord:
+    id: int
+    provider: str
+    job_id: str | None
+    model: str | None
+    input_tokens: int | None
+    output_tokens: int | None
+    cost_usd: Decimal | None
+    latency_ms: int | None
+    quota_limit: Decimal | None
+    quota_remaining: Decimal | None
+    quota_unit: str | None
+    quota_reset_at: datetime | None
+    rate_limited: bool | None
+    recorded_at: str
 
 
 MIGRATIONS = (
@@ -587,6 +619,120 @@ MIGRATIONS = (
             WHEN OLD.promoted_job_id IS NOT NULL
             BEGIN
                 SELECT RAISE(ABORT, 'Promoted planner items are immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=8,
+        name="create_usage",
+        statements=(
+            """
+            CREATE TABLE usage (
+                id INTEGER PRIMARY KEY CHECK (id > 0),
+                provider TEXT NOT NULL CHECK (
+                    length(provider) > 0
+                    AND length(CAST(provider AS BLOB)) <= 128
+                    AND provider = trim(provider)
+                    AND instr(provider, char(0)) = 0
+                ),
+                job_id TEXT REFERENCES jobs(id) ON DELETE RESTRICT,
+                model TEXT CHECK (
+                    model IS NULL OR (
+                        length(model) > 0
+                        AND length(CAST(model AS BLOB)) <= 512
+                        AND model = trim(model)
+                        AND instr(model, char(0)) = 0
+                    )
+                ),
+                input_tokens INTEGER CHECK (
+                    input_tokens IS NULL OR input_tokens >= 0
+                ),
+                output_tokens INTEGER CHECK (
+                    output_tokens IS NULL OR output_tokens >= 0
+                ),
+                cost_usd TEXT CHECK (
+                    cost_usd IS NULL OR (
+                        length(CAST(cost_usd AS BLOB)) <= 128
+                        AND json_valid(cost_usd)
+                        AND json_type(cost_usd) IN ('integer', 'real')
+                        AND CAST(cost_usd AS REAL) >= 0
+                    )
+                ),
+                latency_ms INTEGER CHECK (
+                    latency_ms IS NULL OR latency_ms >= 0
+                ),
+                quota_limit TEXT CHECK (
+                    quota_limit IS NULL OR (
+                        length(CAST(quota_limit AS BLOB)) <= 128
+                        AND json_valid(quota_limit)
+                        AND json_type(quota_limit) IN ('integer', 'real')
+                        AND CAST(quota_limit AS REAL) >= 0
+                    )
+                ),
+                quota_remaining TEXT CHECK (
+                    quota_remaining IS NULL OR (
+                        length(CAST(quota_remaining AS BLOB)) <= 128
+                        AND json_valid(quota_remaining)
+                        AND json_type(quota_remaining) IN ('integer', 'real')
+                        AND CAST(quota_remaining AS REAL) >= 0
+                    )
+                ),
+                quota_unit TEXT CHECK (
+                    quota_unit IS NULL OR (
+                        length(quota_unit) > 0
+                        AND length(CAST(quota_unit AS BLOB)) <= 64
+                        AND quota_unit = trim(quota_unit)
+                        AND instr(quota_unit, char(0)) = 0
+                    )
+                ),
+                quota_reset_at INTEGER CHECK (
+                    quota_reset_at IS NULL OR quota_reset_at > 0
+                ),
+                rate_limited INTEGER CHECK (
+                    rate_limited IS NULL OR rate_limited IN (0, 1)
+                ),
+                recorded_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                CHECK (
+                    input_tokens IS NOT NULL OR output_tokens IS NOT NULL
+                    OR cost_usd IS NOT NULL OR latency_ms IS NOT NULL
+                    OR quota_limit IS NOT NULL OR quota_remaining IS NOT NULL
+                    OR quota_reset_at IS NOT NULL OR rate_limited IS NOT NULL
+                ),
+                CHECK (
+                    (quota_limit IS NULL AND quota_remaining IS NULL AND quota_unit IS NULL)
+                    OR (
+                        quota_unit IS NOT NULL
+                        AND (quota_limit IS NOT NULL OR quota_remaining IS NOT NULL)
+                    )
+                ),
+                CHECK (
+                    quota_limit IS NULL OR quota_remaining IS NULL
+                    OR CAST(quota_remaining AS REAL) <= CAST(quota_limit AS REAL)
+                )
+            )
+            """,
+            """
+            CREATE INDEX usage_job_recorded_idx
+            ON usage (job_id, recorded_at, id)
+            """,
+            """
+            CREATE INDEX usage_provider_recorded_idx
+            ON usage (provider, recorded_at, id)
+            """,
+            """
+            CREATE TRIGGER usage_prevent_update
+            BEFORE UPDATE ON usage
+            BEGIN
+                SELECT RAISE(ABORT, 'Usage observations are immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER usage_prevent_delete
+            BEFORE DELETE ON usage
+            BEGIN
+                SELECT RAISE(ABORT, 'Usage observations are immutable.');
             END
             """,
         ),
@@ -2013,3 +2159,312 @@ class PlannerRepository(_Repository):
             ValueError,
         ) as error:
             raise PlannerRepositoryError("Stored planner data is invalid.") from error
+
+
+class UsageRepository(_Repository):
+    error_type = UsageRepositoryError
+    storage_name = "Usage"
+    _epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    _maximum_integer = 9_223_372_036_854_775_807
+
+    def record(self, usage: UsageCreate) -> UsageRecord:
+        cost, quota_limit, quota_remaining, quota_reset_at = self._validate_usage(usage)
+        with self._write_connection() as connection:
+            try:
+                result = connection.execute(
+                    """
+                    INSERT INTO usage (
+                        provider, job_id, model, input_tokens, output_tokens,
+                        cost_usd, latency_ms, quota_limit, quota_remaining,
+                        quota_unit, quota_reset_at, rate_limited
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        usage.provider,
+                        usage.job_id,
+                        usage.model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        cost,
+                        usage.latency_ms,
+                        quota_limit,
+                        quota_remaining,
+                        usage.quota_unit,
+                        quota_reset_at,
+                        usage.rate_limited,
+                    ),
+                )
+                row = self._select_by_id(connection, result.lastrowid)
+                if row is None:
+                    raise UsageRepositoryError("Usage observation could not be recorded.")
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                if getattr(error, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise UsageValidationError("Usage job does not exist.") from error
+                raise UsageRepositoryError("Usage observation could not be recorded.") from error
+        return stored
+
+    def get(self, usage_id: int) -> UsageRecord:
+        normalized_id = self._validate_id(usage_id)
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise UsageNotFoundError("Usage observation does not exist.")
+        return self._to_record(row)
+
+    def list(
+        self,
+        *,
+        job_id: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+    ) -> tuple[UsageRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[str] = []
+        for field, value, maximum_bytes in (
+            ("job_id", job_id, 128),
+            ("provider", provider, 128),
+            ("model", model, 512),
+        ):
+            if value is not None:
+                clauses.append(f"{field} = ?")
+                parameters.append(
+                    self._validate_text(value, field=field, maximum_bytes=maximum_bytes)
+                )
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, provider, job_id, model, input_tokens, output_tokens,
+                       cost_usd, latency_ms, quota_limit, quota_remaining,
+                       quota_unit, quota_reset_at, rate_limited, recorded_at
+                FROM usage
+                {where}
+                ORDER BY recorded_at, id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(connection: sqlite3.Connection, usage_id: object) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, provider, job_id, model, input_tokens, output_tokens,
+                   cost_usd, latency_ms, quota_limit, quota_remaining,
+                   quota_unit, quota_reset_at, rate_limited, recorded_at
+            FROM usage
+            WHERE id = ?
+            """,
+            (usage_id,),
+        ).fetchone()
+
+    @classmethod
+    def _validate_usage(
+        cls,
+        usage: UsageCreate,
+    ) -> tuple[str | None, str | None, str | None, int | None]:
+        if not isinstance(usage, UsageCreate):
+            raise UsageValidationError("Usage must use the supported creation contract.")
+        cls._validate_text(usage.provider, field="provider", maximum_bytes=128)
+        cls._validate_optional_text(usage.job_id, field="job_id", maximum_bytes=128)
+        cls._validate_optional_text(usage.model, field="model", maximum_bytes=512)
+        cls._validate_optional_integer(usage.input_tokens, field="input_tokens")
+        cls._validate_optional_integer(usage.output_tokens, field="output_tokens")
+        cls._validate_optional_integer(usage.latency_ms, field="latency_ms")
+        cost = cls._validate_optional_decimal(usage.cost_usd, field="cost_usd")
+        quota_limit = cls._validate_optional_decimal(usage.quota_limit, field="quota_limit")
+        quota_remaining = cls._validate_optional_decimal(
+            usage.quota_remaining, field="quota_remaining"
+        )
+        cls._validate_optional_text(usage.quota_unit, field="quota_unit", maximum_bytes=64)
+        has_quota_value = usage.quota_limit is not None or usage.quota_remaining is not None
+        if has_quota_value != (usage.quota_unit is not None):
+            raise UsageValidationError("Usage quota values require exactly one quota unit.")
+        if (
+            usage.quota_limit is not None
+            and usage.quota_remaining is not None
+            and usage.quota_remaining > usage.quota_limit
+        ):
+            raise UsageValidationError("Usage quota remaining exceeds the observed limit.")
+        quota_reset_at = (
+            None
+            if usage.quota_reset_at is None
+            else cls._datetime_to_epoch_us(usage.quota_reset_at)
+        )
+        if usage.rate_limited is not None and not isinstance(usage.rate_limited, bool):
+            raise UsageValidationError("Usage rate_limited must be a boolean or null.")
+        observed_values = (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cost_usd,
+            usage.latency_ms,
+            usage.quota_limit,
+            usage.quota_remaining,
+            usage.quota_reset_at,
+            usage.rate_limited,
+        )
+        if all(value is None for value in observed_values):
+            raise UsageValidationError("Usage requires at least one observed value.")
+        return cost, quota_limit, quota_remaining, quota_reset_at
+
+    @classmethod
+    def _validate_id(cls, value: object) -> int:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            or value > cls._maximum_integer
+        ):
+            raise UsageValidationError("Usage id is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_text(value: object, *, field: str, maximum_bytes: int) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise UsageValidationError(f"Usage {field} is invalid.")
+        if len(value.encode("utf-8")) > maximum_bytes:
+            raise UsageValidationError(f"Usage {field} is too large.")
+        return value
+
+    @classmethod
+    def _validate_optional_text(
+        cls,
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int,
+    ) -> str | None:
+        if value is None:
+            return None
+        return cls._validate_text(value, field=field, maximum_bytes=maximum_bytes)
+
+    @classmethod
+    def _validate_optional_integer(cls, value: object, *, field: str) -> int | None:
+        if value is None:
+            return None
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            or value > cls._maximum_integer
+        ):
+            raise UsageValidationError(f"Usage {field} is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_optional_decimal(value: object, *, field: str) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
+            raise UsageValidationError(f"Usage {field} is invalid.")
+        if len(value.as_tuple().digits) > 100 or not -100 <= value.as_tuple().exponent <= 100:
+            raise UsageValidationError(f"Usage {field} is too precise or too large.")
+        serialized = format(value, "f")
+        if "." in serialized:
+            serialized = serialized.rstrip("0").rstrip(".")
+        if value.is_zero():
+            serialized = "0"
+        if len(serialized.encode("utf-8")) > 128:
+            raise UsageValidationError(f"Usage {field} is too precise or too large.")
+        return serialized
+
+    @classmethod
+    def _datetime_to_epoch_us(cls, value: object) -> int:
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            raise UsageValidationError("Usage quota reset time must include a timezone.")
+        try:
+            offset = value.utcoffset()
+            normalized = value.astimezone(UTC)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise UsageValidationError("Usage quota reset time is invalid.") from error
+        if offset is None or normalized <= cls._epoch:
+            raise UsageValidationError("Usage quota reset time is invalid.")
+        delta = normalized - cls._epoch
+        return (delta.days * 86_400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    @classmethod
+    def _epoch_us_to_datetime(cls, value: object) -> datetime:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise UsageValidationError("Usage quota reset time is invalid.")
+        try:
+            return cls._epoch + timedelta(microseconds=value)
+        except OverflowError as error:
+            raise UsageValidationError("Usage quota reset time is invalid.") from error
+
+    @classmethod
+    def _parse_decimal(cls, value: object, *, field: str) -> Decimal | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise UsageValidationError(f"Usage {field} is invalid.")
+        try:
+            parsed = Decimal(value)
+        except InvalidOperation as error:
+            raise UsageValidationError(f"Usage {field} is invalid.") from error
+        if cls._validate_optional_decimal(parsed, field=field) != value:
+            raise UsageValidationError(f"Usage {field} is not canonical.")
+        return parsed
+
+    @classmethod
+    def _validate_timestamp(cls, value: object) -> str:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise UsageValidationError("Usage recorded_at is invalid.")
+        try:
+            parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+        except ValueError as error:
+            raise UsageValidationError("Usage recorded_at is invalid.") from error
+        if parsed <= cls._epoch:
+            raise UsageValidationError("Usage recorded_at is invalid.")
+        return value
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> UsageRecord:
+        try:
+            quota_reset_at = (
+                None
+                if row["quota_reset_at"] is None
+                else cls._epoch_us_to_datetime(row["quota_reset_at"])
+            )
+            rate_limited_value = row["rate_limited"]
+            if rate_limited_value not in (None, 0, 1):
+                raise UsageValidationError("Usage rate_limited is invalid.")
+            usage = UsageCreate(
+                provider=row["provider"],
+                job_id=row["job_id"],
+                model=row["model"],
+                input_tokens=row["input_tokens"],
+                output_tokens=row["output_tokens"],
+                cost_usd=cls._parse_decimal(row["cost_usd"], field="cost_usd"),
+                latency_ms=row["latency_ms"],
+                quota_limit=cls._parse_decimal(row["quota_limit"], field="quota_limit"),
+                quota_remaining=cls._parse_decimal(row["quota_remaining"], field="quota_remaining"),
+                quota_unit=row["quota_unit"],
+                quota_reset_at=quota_reset_at,
+                rate_limited=(None if rate_limited_value is None else bool(rate_limited_value)),
+            )
+            cls._validate_usage(usage)
+            return UsageRecord(
+                id=cls._validate_id(row["id"]),
+                provider=usage.provider,
+                job_id=usage.job_id,
+                model=usage.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                cost_usd=usage.cost_usd,
+                latency_ms=usage.latency_ms,
+                quota_limit=usage.quota_limit,
+                quota_remaining=usage.quota_remaining,
+                quota_unit=usage.quota_unit,
+                quota_reset_at=usage.quota_reset_at,
+                rate_limited=usage.rate_limited,
+                recorded_at=cls._validate_timestamp(row["recorded_at"]),
+            )
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            UsageValidationError,
+        ) as error:
+            raise UsageRepositoryError("Stored usage data is invalid.") from error

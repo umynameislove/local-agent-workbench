@@ -6,6 +6,7 @@ import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -210,6 +211,22 @@ class PlannerItemCreate:
     due_at: datetime | None = None
     source: str | None = None
     source_key: str | None = None
+
+
+@dataclass(frozen=True)
+class UsageCreate:
+    provider: str
+    job_id: str | None = None
+    model: str | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cost_usd: Decimal | None = None
+    latency_ms: int | None = None
+    quota_limit: Decimal | None = None
+    quota_remaining: Decimal | None = None
+    quota_unit: str | None = None
+    quota_reset_at: datetime | None = None
+    rate_limited: bool | None = None
 
 
 @dataclass(frozen=True)
