@@ -10,6 +10,7 @@ from app import create_app
 from db import (
     LATEST_SCHEMA_VERSION,
     ApprovalRepository,
+    AtomicTransitionService,
     EventRepository,
     JobRepository,
     MemoryReferenceRepository,
@@ -99,6 +100,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.planner_repository, PlannerRepository)
         assert isinstance(api.state.usage_repository, UsageRepository)
         assert isinstance(api.state.memory_reference_repository, MemoryReferenceRepository)
+        assert isinstance(api.state.atomic_transition_service, AtomicTransitionService)
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             health = await client.get("/api/health")
