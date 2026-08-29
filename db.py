@@ -20,6 +20,7 @@ from engine import (
     JobRuntime,
     JobState,
     JobUpdate,
+    MemoryReferenceCreate,
     PermissionMode,
     PlannerItemCreate,
     PlannerItemKind,
@@ -153,6 +154,18 @@ class UsageNotFoundError(UsageRepositoryError):
     """Raised when a requested usage observation does not exist."""
 
 
+class MemoryReferenceRepositoryError(DatabaseError):
+    """Base error for safe projmem reference persistence failures."""
+
+
+class MemoryReferenceValidationError(MemoryReferenceRepositoryError):
+    """Raised when a projmem reference violates the persistence contract."""
+
+
+class MemoryReferenceNotFoundError(MemoryReferenceRepositoryError):
+    """Raised when a requested projmem reference does not exist."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -257,6 +270,15 @@ class UsageRecord:
     quota_reset_at: datetime | None
     rate_limited: bool | None
     recorded_at: str
+
+
+@dataclass(frozen=True)
+class MemoryReferenceRecord:
+    id: int
+    projmem_record_id: str
+    job_id: str
+    event_id: int | None
+    created_at: str
 
 
 MIGRATIONS = (
@@ -733,6 +755,67 @@ MIGRATIONS = (
             BEFORE DELETE ON usage
             BEGIN
                 SELECT RAISE(ABORT, 'Usage observations are immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=9,
+        name="create_memory_refs",
+        statements=(
+            """
+            CREATE UNIQUE INDEX events_id_job_idx
+            ON events (id, job_id)
+            """,
+            """
+            CREATE TABLE memory_refs (
+                id INTEGER PRIMARY KEY CHECK (id > 0),
+                projmem_record_id TEXT NOT NULL CHECK (
+                    length(projmem_record_id) > 0
+                    AND length(CAST(projmem_record_id AS BLOB)) <= 512
+                    AND projmem_record_id = trim(projmem_record_id)
+                    AND instr(projmem_record_id, char(0)) = 0
+                ),
+                job_id TEXT NOT NULL
+                    REFERENCES jobs(id) ON DELETE RESTRICT,
+                event_id INTEGER CHECK (event_id IS NULL OR event_id > 0),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                FOREIGN KEY (event_id, job_id)
+                    REFERENCES events(id, job_id) ON DELETE RESTRICT
+            )
+            """,
+            """
+            CREATE UNIQUE INDEX memory_refs_job_scope_idx
+            ON memory_refs (projmem_record_id, job_id)
+            WHERE event_id IS NULL
+            """,
+            """
+            CREATE UNIQUE INDEX memory_refs_event_scope_idx
+            ON memory_refs (projmem_record_id, job_id, event_id)
+            WHERE event_id IS NOT NULL
+            """,
+            """
+            CREATE INDEX memory_refs_job_created_idx
+            ON memory_refs (job_id, created_at, id)
+            """,
+            """
+            CREATE INDEX memory_refs_event_created_idx
+            ON memory_refs (event_id, created_at, id)
+            WHERE event_id IS NOT NULL
+            """,
+            """
+            CREATE TRIGGER memory_refs_prevent_update
+            BEFORE UPDATE ON memory_refs
+            BEGIN
+                SELECT RAISE(ABORT, 'Memory references are immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER memory_refs_prevent_delete
+            BEFORE DELETE ON memory_refs
+            BEGIN
+                SELECT RAISE(ABORT, 'Memory references are immutable.');
             END
             """,
         ),
@@ -2468,3 +2551,196 @@ class UsageRepository(_Repository):
             UsageValidationError,
         ) as error:
             raise UsageRepositoryError("Stored usage data is invalid.") from error
+
+
+class MemoryReferenceRepository(_Repository):
+    error_type = MemoryReferenceRepositoryError
+    storage_name = "Memory reference"
+    _epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    _maximum_integer = 9_223_372_036_854_775_807
+
+    def link(self, reference: MemoryReferenceCreate) -> MemoryReferenceRecord:
+        self._validate_reference(reference)
+        with self._write_connection() as connection:
+            existing = self._select_exact(connection, reference)
+            if existing is not None:
+                return self._to_record(existing)
+            try:
+                result = connection.execute(
+                    """
+                    INSERT INTO memory_refs (projmem_record_id, job_id, event_id)
+                    VALUES (?, ?, ?)
+                    """,
+                    (
+                        reference.projmem_record_id,
+                        reference.job_id,
+                        reference.event_id,
+                    ),
+                )
+                row = self._select_by_id(connection, result.lastrowid)
+                if row is None:
+                    raise MemoryReferenceRepositoryError("Memory reference could not be linked.")
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                error_name = getattr(error, "sqlite_errorname", "")
+                if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise MemoryReferenceValidationError(
+                        "Memory reference job or event provenance does not exist."
+                    ) from error
+                raise MemoryReferenceRepositoryError(
+                    "Memory reference could not be linked."
+                ) from error
+        return stored
+
+    def get(self, reference_id: int) -> MemoryReferenceRecord:
+        normalized_id = self._validate_id(reference_id)
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise MemoryReferenceNotFoundError("Memory reference does not exist.")
+        return self._to_record(row)
+
+    def list(
+        self,
+        *,
+        job_id: str | None = None,
+        event_id: int | None = None,
+        projmem_record_id: str | None = None,
+    ) -> tuple[MemoryReferenceRecord, ...]:
+        clauses: list[str] = []
+        parameters: list[object] = []
+        if job_id is not None:
+            clauses.append("job_id = ?")
+            parameters.append(self._validate_text(job_id, field="job_id", maximum_bytes=None))
+        if event_id is not None:
+            clauses.append("event_id = ?")
+            parameters.append(self._validate_id(event_id))
+        if projmem_record_id is not None:
+            clauses.append("projmem_record_id = ?")
+            parameters.append(
+                self._validate_text(
+                    projmem_record_id,
+                    field="projmem_record_id",
+                    maximum_bytes=512,
+                )
+            )
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, projmem_record_id, job_id, event_id, created_at
+                FROM memory_refs
+                {where}
+                ORDER BY created_at, id
+                """,
+                tuple(parameters),
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(
+        connection: sqlite3.Connection,
+        reference_id: object,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, projmem_record_id, job_id, event_id, created_at
+            FROM memory_refs
+            WHERE id = ?
+            """,
+            (reference_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _select_exact(
+        connection: sqlite3.Connection,
+        reference: MemoryReferenceCreate,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, projmem_record_id, job_id, event_id, created_at
+            FROM memory_refs
+            WHERE projmem_record_id = ? AND job_id = ? AND event_id IS ?
+            """,
+            (reference.projmem_record_id, reference.job_id, reference.event_id),
+        ).fetchone()
+
+    @classmethod
+    def _validate_reference(cls, reference: MemoryReferenceCreate) -> None:
+        if not isinstance(reference, MemoryReferenceCreate):
+            raise MemoryReferenceValidationError(
+                "Memory reference must use the supported creation contract."
+            )
+        cls._validate_text(
+            reference.projmem_record_id,
+            field="projmem_record_id",
+            maximum_bytes=512,
+        )
+        cls._validate_text(reference.job_id, field="job_id", maximum_bytes=None)
+        if reference.event_id is not None:
+            cls._validate_id(reference.event_id)
+
+    @classmethod
+    def _validate_id(cls, value: object) -> int:
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+            or value > cls._maximum_integer
+        ):
+            raise MemoryReferenceValidationError("Memory reference id is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_text(
+        value: object,
+        *,
+        field: str,
+        maximum_bytes: int | None,
+    ) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise MemoryReferenceValidationError(f"Memory reference {field} is invalid.")
+        if maximum_bytes is not None and len(value.encode("utf-8")) > maximum_bytes:
+            raise MemoryReferenceValidationError(f"Memory reference {field} is too large.")
+        return value
+
+    @classmethod
+    def _validate_timestamp(cls, value: object) -> str:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise MemoryReferenceValidationError("Memory reference created_at is invalid.")
+        try:
+            parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+        except ValueError as error:
+            raise MemoryReferenceValidationError(
+                "Memory reference created_at is invalid."
+            ) from error
+        if parsed <= cls._epoch:
+            raise MemoryReferenceValidationError("Memory reference created_at is invalid.")
+        return value
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> MemoryReferenceRecord:
+        try:
+            reference = MemoryReferenceCreate(
+                projmem_record_id=row["projmem_record_id"],
+                job_id=row["job_id"],
+                event_id=row["event_id"],
+            )
+            cls._validate_reference(reference)
+            return MemoryReferenceRecord(
+                id=cls._validate_id(row["id"]),
+                projmem_record_id=reference.projmem_record_id,
+                job_id=reference.job_id,
+                event_id=reference.event_id,
+                created_at=cls._validate_timestamp(row["created_at"]),
+            )
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            MemoryReferenceValidationError,
+        ) as error:
+            raise MemoryReferenceRepositoryError(
+                "Stored memory reference data is invalid."
+            ) from error

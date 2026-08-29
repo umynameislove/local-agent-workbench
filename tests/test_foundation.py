@@ -12,6 +12,7 @@ from db import (
     ApprovalRepository,
     EventRepository,
     JobRepository,
+    MemoryReferenceRepository,
     PlannerRepository,
     ProjectRepository,
     UsageRepository,
@@ -97,6 +98,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.approval_repository, ApprovalRepository)
         assert isinstance(api.state.planner_repository, PlannerRepository)
         assert isinstance(api.state.usage_repository, UsageRepository)
+        assert isinstance(api.state.memory_reference_repository, MemoryReferenceRepository)
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             health = await client.get("/api/health")

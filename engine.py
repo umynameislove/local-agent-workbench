@@ -230,6 +230,13 @@ class UsageCreate:
 
 
 @dataclass(frozen=True)
+class MemoryReferenceCreate:
+    projmem_record_id: str
+    job_id: str
+    event_id: int | None = None
+
+
+@dataclass(frozen=True)
 class ConsultantConfig:
     enabled: bool = False
     model: str = CONSULTANT_MODEL
