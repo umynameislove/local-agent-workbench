@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 
 from db import (
     ApprovalRepository,
+    AtomicTransitionService,
     Database,
     EventRepository,
     JobRepository,
@@ -47,6 +48,7 @@ def create_app(
         app.state.planner_repository = PlannerRepository(database)
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
+        app.state.atomic_transition_service = AtomicTransitionService(database)
         app.state.schema_version = schema_version
         logger.info(
             "Runtime storage is ready.",

@@ -94,6 +94,18 @@ class EventIdempotencyConflictError(EventRepositoryError):
     """Raised when an idempotency key is reused for a different event."""
 
 
+class AtomicTransitionError(DatabaseError):
+    """Base error for atomic job transition failures."""
+
+
+class AtomicTransitionValidationError(AtomicTransitionError):
+    """Raised when an atomic transition request is invalid."""
+
+
+class AtomicTransitionConflictError(AtomicTransitionError):
+    """Raised when an atomic transition conflicts with committed state."""
+
+
 class ApprovalRepositoryError(DatabaseError):
     """Base error for safe approval persistence failures."""
 
@@ -217,6 +229,12 @@ class EventRecord:
     payload_hash: str
     idempotency_key: str | None
     created_at: str
+
+
+@dataclass(frozen=True)
+class AtomicTransitionRecord:
+    job: JobRecord
+    event: EventRecord
 
 
 @dataclass(frozen=True)
@@ -1182,22 +1200,7 @@ class JobRepository(_Repository):
     def update(self, job: JobUpdate) -> JobRecord:
         self._validate_update(job)
         with self._write_connection() as connection:
-            result = connection.execute(
-                """
-                UPDATE jobs
-                SET state = ?, runtime = ?, model = ?, worktree_path = ?,
-                    updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
-                WHERE id = ?
-                """,
-                (job.state.value, job.runtime.value, job.model, job.worktree_path, job.id),
-            )
-            if result.rowcount != 1:
-                raise JobNotFoundError("Job does not exist.")
-            row = self._select_by_id(connection, job.id)
-            if row is None:
-                raise JobRepositoryError("Job could not be updated.")
-            stored = self._to_record(row)
-        return stored
+            return self._update(connection, job)
 
     def get(self, job_id: str) -> JobRecord:
         normalized_id = self._validate_text(job_id, field="id")
@@ -1254,6 +1257,28 @@ class JobRepository(_Repository):
         row = cls._select_by_id(connection, job.id)
         if row is None:
             raise JobRepositoryError("Job could not be created.")
+        return cls._to_record(row)
+
+    @classmethod
+    def _update(
+        cls,
+        connection: sqlite3.Connection,
+        job: JobUpdate,
+    ) -> JobRecord:
+        result = connection.execute(
+            """
+            UPDATE jobs
+            SET state = ?, runtime = ?, model = ?, worktree_path = ?,
+                updated_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')
+            WHERE id = ?
+            """,
+            (job.state.value, job.runtime.value, job.model, job.worktree_path, job.id),
+        )
+        if result.rowcount != 1:
+            raise JobNotFoundError("Job does not exist.")
+        row = cls._select_by_id(connection, job.id)
+        if row is None:
+            raise JobRepositoryError("Job could not be updated.")
         return cls._to_record(row)
 
     @staticmethod
@@ -1374,66 +1399,99 @@ class EventRepository(_Repository):
         payload, payload_hash, idempotency_key = self._validate_event(event)
         with self._write_connection() as connection:
             try:
-                if idempotency_key is not None:
-                    existing = self._select_by_idempotency_key(
-                        connection, event.job_id, idempotency_key
-                    )
-                    if existing is not None:
-                        stored = self._to_record(existing)
-                        if (
-                            stored.event_type != event.event_type
-                            or stored.payload_hash != payload_hash
-                        ):
-                            raise EventIdempotencyConflictError(
-                                "Event idempotency key conflicts with stored data."
-                            )
-                        return stored
-                latest = connection.execute(
-                    """
-                    SELECT sequence
-                    FROM events
-                    WHERE job_id = ?
-                    ORDER BY sequence DESC
-                    LIMIT 1
-                    """,
-                    (event.job_id,),
-                ).fetchone()
-                previous_sequence = 0 if latest is None else latest["sequence"]
-                if (
-                    not isinstance(previous_sequence, int)
-                    or isinstance(previous_sequence, bool)
-                    or previous_sequence < 0
-                    or previous_sequence >= 9_223_372_036_854_775_807
-                ):
-                    raise EventRepositoryError("Stored event sequence is invalid.")
-                result = connection.execute(
-                    """
-                    INSERT INTO events (
-                        job_id, sequence, event_type, payload, payload_hash,
-                        idempotency_key
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event.job_id,
-                        previous_sequence + 1,
-                        event.event_type,
-                        payload,
-                        payload_hash,
-                        idempotency_key,
-                    ),
+                stored = self._append(
+                    connection,
+                    event,
+                    payload,
+                    payload_hash,
+                    idempotency_key,
                 )
-                event_id = result.lastrowid
-                if not isinstance(event_id, int) or event_id < 1:
-                    raise EventRepositoryError("Event could not be appended.")
-                row = self._select_by_id(connection, event_id)
-                if row is None:
-                    raise EventRepositoryError("Event could not be appended.")
-                stored = self._to_record(row)
             except sqlite3.IntegrityError as error:
                 error_name = getattr(error, "sqlite_errorname", "")
                 if error_name == "SQLITE_CONSTRAINT_FOREIGNKEY":
                     raise EventValidationError("Event job does not exist.") from error
                 raise EventRepositoryError("Event could not be appended.") from error
+        return stored
+
+    @classmethod
+    def _append(
+        cls,
+        connection: sqlite3.Connection,
+        event: EventCreate,
+        payload: str,
+        payload_hash: str,
+        idempotency_key: str | None,
+    ) -> EventRecord:
+        existing = cls._matching_idempotent_event(
+            connection,
+            event,
+            payload_hash,
+            idempotency_key,
+        )
+        if existing is not None:
+            return existing
+        latest = connection.execute(
+            """
+            SELECT sequence
+            FROM events
+            WHERE job_id = ?
+            ORDER BY sequence DESC
+            LIMIT 1
+            """,
+            (event.job_id,),
+        ).fetchone()
+        previous_sequence = 0 if latest is None else latest["sequence"]
+        if (
+            not isinstance(previous_sequence, int)
+            or isinstance(previous_sequence, bool)
+            or previous_sequence < 0
+            or previous_sequence >= 9_223_372_036_854_775_807
+        ):
+            raise EventRepositoryError("Stored event sequence is invalid.")
+        result = connection.execute(
+            """
+            INSERT INTO events (
+                job_id, sequence, event_type, payload, payload_hash,
+                idempotency_key
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.job_id,
+                previous_sequence + 1,
+                event.event_type,
+                payload,
+                payload_hash,
+                idempotency_key,
+            ),
+        )
+        event_id = result.lastrowid
+        if not isinstance(event_id, int) or event_id < 1:
+            raise EventRepositoryError("Event could not be appended.")
+        row = cls._select_by_id(connection, event_id)
+        if row is None:
+            raise EventRepositoryError("Event could not be appended.")
+        return cls._to_record(row)
+
+    @classmethod
+    def _matching_idempotent_event(
+        cls,
+        connection: sqlite3.Connection,
+        event: EventCreate,
+        payload_hash: str,
+        idempotency_key: str | None,
+    ) -> EventRecord | None:
+        if idempotency_key is None:
+            return None
+        existing = cls._select_by_idempotency_key(
+            connection,
+            event.job_id,
+            idempotency_key,
+        )
+        if existing is None:
+            return None
+        stored = cls._to_record(existing)
+        if stored.event_type != event.event_type or stored.payload_hash != payload_hash:
+            raise EventIdempotencyConflictError("Event idempotency key conflicts with stored data.")
         return stored
 
     def get(self, event_id: int) -> EventRecord:
@@ -1586,6 +1644,88 @@ class EventRepository(_Repository):
             ValueError,
         ) as error:
             raise EventRepositoryError("Stored event data is invalid.") from error
+
+
+class AtomicTransitionService(_Repository):
+    error_type = AtomicTransitionError
+    storage_name = "Atomic transition"
+
+    def transition(
+        self,
+        job: JobUpdate,
+        event: EventCreate,
+    ) -> AtomicTransitionRecord:
+        try:
+            JobRepository._validate_update(job)
+            payload, payload_hash, idempotency_key = EventRepository._validate_event(event)
+        except (JobValidationError, EventValidationError) as error:
+            raise AtomicTransitionValidationError(
+                "Atomic transition request is invalid."
+            ) from error
+        if job.id != event.job_id:
+            raise AtomicTransitionValidationError(
+                "Atomic transition job and event identifiers must match."
+            )
+
+        with self._write_connection() as connection:
+            try:
+                existing_event = EventRepository._matching_idempotent_event(
+                    connection,
+                    event,
+                    payload_hash,
+                    idempotency_key,
+                )
+                if existing_event is not None:
+                    return self._resolve_retry(connection, job, existing_event)
+                stored_job = JobRepository._update(connection, job)
+                stored_event = EventRepository._append(
+                    connection,
+                    event,
+                    payload,
+                    payload_hash,
+                    idempotency_key,
+                )
+                return AtomicTransitionRecord(job=stored_job, event=stored_event)
+            except JobNotFoundError as error:
+                raise AtomicTransitionValidationError(
+                    "Atomic transition job does not exist."
+                ) from error
+            except EventIdempotencyConflictError as error:
+                raise AtomicTransitionConflictError(
+                    "Atomic transition idempotency key conflicts with committed data."
+                ) from error
+            except sqlite3.IntegrityError as error:
+                raise AtomicTransitionError("Atomic transition could not be recorded.") from error
+            except (JobRepositoryError, EventRepositoryError) as error:
+                raise AtomicTransitionError(
+                    "Atomic transition encountered invalid stored data."
+                ) from error
+
+    @classmethod
+    def _resolve_retry(
+        cls,
+        connection: sqlite3.Connection,
+        requested: JobUpdate,
+        event: EventRecord,
+    ) -> AtomicTransitionRecord:
+        row = JobRepository._select_by_id(connection, requested.id)
+        if row is None:
+            raise JobNotFoundError("Job does not exist.")
+        stored_job = JobRepository._to_record(row)
+        if not cls._matches_requested_state(stored_job, requested):
+            raise AtomicTransitionConflictError(
+                "Atomic transition retry conflicts with current job state."
+            )
+        return AtomicTransitionRecord(job=stored_job, event=event)
+
+    @staticmethod
+    def _matches_requested_state(stored: JobRecord, requested: JobUpdate) -> bool:
+        return (
+            stored.state == requested.state
+            and stored.runtime == requested.runtime
+            and stored.model == requested.model
+            and stored.worktree_path == requested.worktree_path
+        )
 
 
 class ApprovalRepository(_Repository):
