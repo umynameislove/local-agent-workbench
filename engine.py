@@ -9,6 +9,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 APP_VERSION = "0.1.0"
@@ -51,6 +52,88 @@ class JobState(StrEnum):
     FAILED = "failed"
     BLOCKED = "blocked"
     CANCELLED = "cancelled"
+
+
+class ForbiddenJobTransitionError(ValueError):
+    """Raised when a job attempts to leave its defined lifecycle."""
+
+    def __init__(self, current_state: JobState, target_state: JobState) -> None:
+        self.current_state = current_state
+        self.target_state = target_state
+        super().__init__(
+            f"Job cannot transition from {current_state.value} to {target_state.value}."
+        )
+
+
+_STOP_STATES = frozenset(
+    {
+        JobState.FAILED,
+        JobState.BLOCKED,
+        JobState.CANCELLED,
+    }
+)
+
+
+def _with_stop_states(*states: JobState) -> frozenset[JobState]:
+    return frozenset(states) | _STOP_STATES
+
+
+ALLOWED_JOB_TRANSITIONS: Mapping[JobState, frozenset[JobState]] = MappingProxyType(
+    {
+        JobState.CREATED: _with_stop_states(JobState.CLASSIFIED),
+        JobState.CLASSIFIED: _with_stop_states(JobState.PLANNING),
+        JobState.PLANNING: _with_stop_states(
+            JobState.QUEUED,
+            JobState.WAITING_INPUT,
+        ),
+        JobState.QUEUED: _with_stop_states(JobState.RUNNING),
+        JobState.RUNNING: _with_stop_states(
+            JobState.WAITING_INPUT,
+            JobState.WAITING_APPROVAL,
+            JobState.VERIFYING,
+        ),
+        JobState.WAITING_INPUT: _with_stop_states(
+            JobState.PLANNING,
+            JobState.QUEUED,
+            JobState.RUNNING,
+        ),
+        JobState.WAITING_APPROVAL: _with_stop_states(
+            JobState.RUNNING,
+            JobState.APPROVED,
+            JobState.REJECTED,
+        ),
+        JobState.VERIFYING: _with_stop_states(
+            JobState.RUNNING,
+            JobState.REVIEW_READY,
+        ),
+        JobState.REVIEW_READY: _with_stop_states(
+            JobState.RUNNING,
+            JobState.WAITING_APPROVAL,
+            JobState.APPROVED,
+            JobState.REJECTED,
+        ),
+        JobState.APPROVED: _with_stop_states(JobState.APPLYING),
+        JobState.APPLYING: _with_stop_states(JobState.COMPLETED),
+        JobState.COMPLETED: frozenset(),
+        JobState.REJECTED: frozenset(),
+        JobState.FAILED: frozenset(),
+        JobState.BLOCKED: frozenset(),
+        JobState.CANCELLED: frozenset(),
+    }
+)
+
+TERMINAL_JOB_STATES = frozenset(
+    state for state, transitions in ALLOWED_JOB_TRANSITIONS.items() if not transitions
+)
+
+
+def validate_job_transition(current_state: JobState, target_state: JobState) -> None:
+    """Require a transition declared by the durable job lifecycle."""
+
+    if not isinstance(current_state, JobState) or not isinstance(target_state, JobState):
+        raise TypeError("Job transition states must use JobState values.")
+    if target_state not in ALLOWED_JOB_TRANSITIONS[current_state]:
+        raise ForbiddenJobTransitionError(current_state, target_state)
 
 
 class JobRuntime(StrEnum):

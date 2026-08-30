@@ -55,7 +55,7 @@ def job(job_id: str = "job-001") -> JobCreate:
 def update(**overrides: Any) -> JobUpdate:
     values: dict[str, Any] = {
         "id": "job-001",
-        "state": JobState.QUEUED,
+        "state": JobState.CLASSIFIED,
         "runtime": JobRuntime.CODEX,
         "model": "gpt-5.6-codex",
         "worktree_path": "/runtime/worktrees/job-001",
@@ -67,8 +67,8 @@ def update(**overrides: Any) -> JobUpdate:
 def event(**overrides: Any) -> EventCreate:
     values: dict[str, Any] = {
         "job_id": "job-001",
-        "event_type": "job.queued",
-        "payload": {"state": "queued"},
+        "event_type": "job.classified",
+        "payload": {"state": "classified"},
         "idempotency_key": "transition-001",
     }
     values.update(overrides)
@@ -92,7 +92,7 @@ def test_transition_updates_job_and_appends_event_in_one_result(tmp_path: Path) 
 
     result = service.transition(update(), event())
 
-    assert result.job.state is JobState.QUEUED
+    assert result.job.state is JobState.CLASSIFIED
     assert result.job.runtime is JobRuntime.CODEX
     assert result.job.model == "gpt-5.6-codex"
     assert result.job.worktree_path == "/runtime/worktrees/job-001"
@@ -100,7 +100,7 @@ def test_transition_updates_job_and_appends_event_in_one_result(tmp_path: Path) 
     assert result.job.request_snapshot == original.request_snapshot
     assert result.event.job_id == result.job.id
     assert result.event.sequence == 1
-    assert result.event.payload == {"state": "queued"}
+    assert result.event.payload == {"state": "classified"}
     assert jobs.get("job-001") == result.job
     assert events.list("job-001") == (result.event,)
 
@@ -200,16 +200,16 @@ def test_conflicting_idempotency_payload_does_not_change_job(tmp_path: Path) -> 
     _, service, jobs, events = initialized_service(tmp_path)
     first = service.transition(update(), event())
     conflicting_update = update(
-        state=JobState.RUNNING,
-        worktree_path="/runtime/worktrees/job-001-running",
+        state=JobState.PLANNING,
+        worktree_path="/runtime/worktrees/job-001-planning",
     )
 
     with pytest.raises(AtomicTransitionConflictError, match="committed data"):
         service.transition(
             conflicting_update,
             event(
-                event_type="job.running",
-                payload={"state": "running"},
+                event_type="job.planning",
+                payload={"state": "planning"},
             ),
         )
 
@@ -219,16 +219,16 @@ def test_conflicting_idempotency_payload_does_not_change_job(tmp_path: Path) -> 
 
 def test_stale_retry_cannot_move_job_behind_newer_event(tmp_path: Path) -> None:
     _, service, jobs, events = initialized_service(tmp_path)
-    queued = service.transition(update(), event())
-    running_update = update(
-        state=JobState.RUNNING,
-        worktree_path="/runtime/worktrees/job-001-running",
+    classified = service.transition(update(), event())
+    planning_update = update(
+        state=JobState.PLANNING,
+        worktree_path="/runtime/worktrees/job-001-planning",
     )
-    running = service.transition(
-        running_update,
+    planning = service.transition(
+        planning_update,
         event(
-            event_type="job.running",
-            payload={"state": "running"},
+            event_type="job.planning",
+            payload={"state": "planning"},
             idempotency_key="transition-002",
         ),
     )
@@ -236,8 +236,8 @@ def test_stale_retry_cannot_move_job_behind_newer_event(tmp_path: Path) -> None:
     with pytest.raises(AtomicTransitionConflictError, match="current job state"):
         service.transition(update(), event())
 
-    assert jobs.get("job-001") == running.job
-    assert events.list("job-001") == (queued.event, running.event)
+    assert jobs.get("job-001") == planning.job
+    assert events.list("job-001") == (classified.event, planning.event)
 
 
 def test_concurrent_matching_retries_commit_one_event(tmp_path: Path) -> None:
@@ -248,7 +248,7 @@ def test_concurrent_matching_retries_commit_one_event(tmp_path: Path) -> None:
 
     assert len({result.event.id for result in results}) == 1
     assert len({result.event.sequence for result in results}) == 1
-    assert all(result.job.state is JobState.QUEUED for result in results)
+    assert all(result.job.state is JobState.CLASSIFIED for result in results)
     assert events.list("job-001") == (results[0].event,)
     assert jobs.get("job-001") == results[-1].job
 
@@ -257,12 +257,12 @@ def test_concurrent_conflicts_leave_one_coherent_pair(tmp_path: Path) -> None:
     _, service, jobs, events = initialized_service(tmp_path)
     requests = (
         (
-            update(state=JobState.QUEUED),
-            event(payload={"state": "queued"}),
+            update(state=JobState.CLASSIFIED),
+            event(payload={"state": "classified"}),
         ),
         (
-            update(state=JobState.RUNNING),
-            event(event_type="job.running", payload={"state": "running"}),
+            update(state=JobState.CANCELLED),
+            event(event_type="job.cancelled", payload={"state": "cancelled"}),
         ),
     )
 
@@ -293,7 +293,10 @@ def test_corrupted_idempotent_event_fails_closed_without_job_change(tmp_path: Pa
             INSERT INTO events (
                 job_id, sequence, event_type, payload, payload_hash,
                 idempotency_key
-            ) VALUES ('job-001', 1, 'job.queued', '{"state":"queued"}', ?, 'transition-001')
+            ) VALUES (
+                'job-001', 1, 'job.classified', '{"state":"classified"}', ?,
+                'transition-001'
+            )
             """,
             ("0" * 64,),
         )
