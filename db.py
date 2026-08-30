@@ -16,6 +16,7 @@ from engine import (
     ApprovalDecision,
     ApprovalResolution,
     EventCreate,
+    ForbiddenJobTransitionError,
     JobCreate,
     JobRuntime,
     JobState,
@@ -27,6 +28,7 @@ from engine import (
     ProjectConfig,
     Sensitivity,
     UsageCreate,
+    validate_job_transition,
 )
 
 
@@ -104,6 +106,10 @@ class AtomicTransitionValidationError(AtomicTransitionError):
 
 class AtomicTransitionConflictError(AtomicTransitionError):
     """Raised when an atomic transition conflicts with committed state."""
+
+
+class AtomicTransitionStateError(AtomicTransitionConflictError):
+    """Raised when a job state change is outside the lifecycle contract."""
 
 
 class ApprovalRepositoryError(DatabaseError):
@@ -1677,6 +1683,11 @@ class AtomicTransitionService(_Repository):
                 )
                 if existing_event is not None:
                     return self._resolve_retry(connection, job, existing_event)
+                row = JobRepository._select_by_id(connection, job.id)
+                if row is None:
+                    raise JobNotFoundError("Job does not exist.")
+                current_job = JobRepository._to_record(row)
+                validate_job_transition(current_job.state, job.state)
                 stored_job = JobRepository._update(connection, job)
                 stored_event = EventRepository._append(
                     connection,
@@ -1693,6 +1704,10 @@ class AtomicTransitionService(_Repository):
             except EventIdempotencyConflictError as error:
                 raise AtomicTransitionConflictError(
                     "Atomic transition idempotency key conflicts with committed data."
+                ) from error
+            except ForbiddenJobTransitionError as error:
+                raise AtomicTransitionStateError(
+                    "Atomic job state transition is not allowed."
                 ) from error
             except sqlite3.IntegrityError as error:
                 raise AtomicTransitionError("Atomic transition could not be recorded.") from error
