@@ -16,6 +16,7 @@ from db import (
     MemoryReferenceRepository,
     PlannerRepository,
     ProjectRepository,
+    RecoveryService,
     UsageRepository,
 )
 from engine import (
@@ -101,6 +102,8 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.usage_repository, UsageRepository)
         assert isinstance(api.state.memory_reference_repository, MemoryReferenceRepository)
         assert isinstance(api.state.atomic_transition_service, AtomicTransitionService)
+        assert isinstance(api.state.recovery_service, RecoveryService)
+        assert api.state.recovery_items == ()
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             health = await client.get("/api/health")

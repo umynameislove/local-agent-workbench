@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from engine import (
+    TERMINAL_JOB_STATES,
     ApprovalCreate,
     ApprovalDecision,
     ApprovalResolution,
@@ -26,6 +27,8 @@ from engine import (
     PlannerItemCreate,
     PlannerItemKind,
     ProjectConfig,
+    RecoveryAction,
+    RecoveryIssue,
     Sensitivity,
     UsageCreate,
     validate_job_transition,
@@ -184,6 +187,10 @@ class MemoryReferenceNotFoundError(MemoryReferenceRepositoryError):
     """Raised when a requested projmem reference does not exist."""
 
 
+class RecoveryServiceError(DatabaseError):
+    """Raised when durable restart state cannot be loaded safely."""
+
+
 @dataclass(frozen=True)
 class Migration:
     version: int
@@ -254,6 +261,15 @@ class ApprovalRecord:
     expires_at: datetime
     created_at: str
     decided_at: str | None
+
+
+@dataclass(frozen=True)
+class RecoveryRecord:
+    job: JobRecord
+    action: RecoveryAction
+    worktree: Path | None
+    approval: ApprovalRecord | None = None
+    issue: RecoveryIssue | None = None
 
 
 @dataclass(frozen=True)
@@ -2050,6 +2066,169 @@ class ApprovalRepository(_Repository):
             ValueError,
         ) as error:
             raise ApprovalRepositoryError("Stored approval data is invalid.") from error
+
+
+class RecoveryService:
+    _actions: Mapping[JobState, RecoveryAction] = {
+        JobState.CREATED: RecoveryAction.SAFE_RESUME,
+        JobState.CLASSIFIED: RecoveryAction.SAFE_RESUME,
+        JobState.PLANNING: RecoveryAction.SAFE_RESUME,
+        JobState.QUEUED: RecoveryAction.SAFE_RESUME,
+        JobState.RUNNING: RecoveryAction.RECONCILE_IN_FLIGHT,
+        JobState.WAITING_INPUT: RecoveryAction.WAIT_FOR_INPUT,
+        JobState.WAITING_APPROVAL: RecoveryAction.WAIT_FOR_APPROVAL,
+        JobState.VERIFYING: RecoveryAction.SAFE_RESUME,
+        JobState.REVIEW_READY: RecoveryAction.READY_FOR_REVIEW,
+        JobState.APPROVED: RecoveryAction.READY_TO_APPLY,
+        JobState.APPLYING: RecoveryAction.RECONCILE_IN_FLIGHT,
+    }
+    _worktree_required = frozenset(
+        {
+            JobState.RUNNING,
+            JobState.WAITING_APPROVAL,
+            JobState.VERIFYING,
+            JobState.REVIEW_READY,
+            JobState.APPROVED,
+            JobState.APPLYING,
+        }
+    )
+
+    def __init__(
+        self,
+        database: Database,
+        worktrees_root: Path,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self.database = database
+        self.worktrees_root = worktrees_root
+        self.clock = clock or self._utc_now
+
+    def load(self) -> tuple[RecoveryRecord, ...]:
+        root = self._resolve_root()
+        now = self._read_clock()
+        try:
+            jobs = JobRepository(self.database).list()
+            approvals = ApprovalRepository(self.database).list()
+        except (JobRepositoryError, ApprovalRepositoryError) as error:
+            raise RecoveryServiceError("Recovery state could not be loaded safely.") from error
+
+        pending_by_job: dict[str, list[ApprovalRecord]] = {}
+        for approval in approvals:
+            if approval.decision is None:
+                pending_by_job.setdefault(approval.job_id, []).append(approval)
+
+        recovered = []
+        for job in jobs:
+            if job.state in TERMINAL_JOB_STATES:
+                continue
+            action = self._actions.get(job.state)
+            if action is None:
+                raise RecoveryServiceError("Recovery behavior is undefined for a job state.")
+            recovered.append(
+                self._classify(
+                    job,
+                    action,
+                    tuple(pending_by_job.get(job.id, ())),
+                    root,
+                    now,
+                )
+            )
+        return tuple(recovered)
+
+    def _classify(
+        self,
+        job: JobRecord,
+        action: RecoveryAction,
+        pending: tuple[ApprovalRecord, ...],
+        root: Path,
+        now: datetime,
+    ) -> RecoveryRecord:
+        if job.state is JobState.WAITING_APPROVAL:
+            if not pending:
+                return self._attention(job, RecoveryIssue.APPROVAL_REQUIRED)
+            if len(pending) != 1:
+                return self._attention(job, RecoveryIssue.MULTIPLE_PENDING_APPROVALS)
+            approval = pending[0]
+            if approval.expires_at <= now:
+                return self._attention(job, RecoveryIssue.APPROVAL_EXPIRED)
+        else:
+            approval = None
+            if pending:
+                return self._attention(job, RecoveryIssue.UNEXPECTED_PENDING_APPROVAL)
+
+        worktree, issue = self._resolve_worktree(job, root)
+        if issue is not None:
+            return self._attention(job, issue, approval=approval)
+        return RecoveryRecord(
+            job=job,
+            action=action,
+            worktree=worktree,
+            approval=approval,
+        )
+
+    def _resolve_worktree(
+        self,
+        job: JobRecord,
+        root: Path,
+    ) -> tuple[Path | None, RecoveryIssue | None]:
+        if job.worktree_path is None:
+            issue = (
+                RecoveryIssue.WORKTREE_REQUIRED if job.state in self._worktree_required else None
+            )
+            return None, issue
+
+        candidate = Path(job.worktree_path)
+        if not candidate.is_absolute():
+            return None, RecoveryIssue.WORKTREE_OUTSIDE_RUNTIME
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            return None, RecoveryIssue.WORKTREE_UNAVAILABLE
+        if not resolved.is_relative_to(root):
+            return None, RecoveryIssue.WORKTREE_OUTSIDE_RUNTIME
+        if not resolved.is_dir():
+            return None, RecoveryIssue.WORKTREE_UNAVAILABLE
+        return resolved, None
+
+    @staticmethod
+    def _attention(
+        job: JobRecord,
+        issue: RecoveryIssue,
+        *,
+        approval: ApprovalRecord | None = None,
+    ) -> RecoveryRecord:
+        return RecoveryRecord(
+            job=job,
+            action=RecoveryAction.NEEDS_ATTENTION,
+            worktree=None,
+            approval=approval,
+            issue=issue,
+        )
+
+    def _resolve_root(self) -> Path:
+        try:
+            root = self.worktrees_root.resolve(strict=True)
+        except OSError as error:
+            raise RecoveryServiceError("Recovery worktree storage is unavailable.") from error
+        if not root.is_dir():
+            raise RecoveryServiceError("Recovery worktree storage is unavailable.")
+        return root
+
+    def _read_clock(self) -> datetime:
+        try:
+            value = self.clock()
+            if not isinstance(value, datetime) or value.tzinfo is None:
+                raise TypeError
+            if value.utcoffset() is None:
+                raise ValueError
+            return value.astimezone(UTC)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise RecoveryServiceError("Recovery clock is invalid.") from error
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(UTC)
 
 
 class PlannerRepository(_Repository):

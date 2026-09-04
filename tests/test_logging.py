@@ -238,6 +238,7 @@ async def test_application_lifecycle_emits_safe_bootstrap_event(
             "context": {
                 "runtime_home_configured": True,
                 "schema_version": LATEST_SCHEMA_VERSION,
+                "recovery_jobs": 0,
             },
             "event": "runtime.bootstrap.completed",
             "level": "INFO",

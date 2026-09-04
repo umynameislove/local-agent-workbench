@@ -16,6 +16,7 @@ from db import (
     MemoryReferenceRepository,
     PlannerRepository,
     ProjectRepository,
+    RecoveryService,
     UsageRepository,
 )
 from engine import APP_VERSION, RUNTIME_ENV, JobRuntime, RuntimeHome, resolve_runtime_home
@@ -49,6 +50,8 @@ def create_app(
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
         app.state.atomic_transition_service = AtomicTransitionService(database)
+        app.state.recovery_service = RecoveryService(database, runtime.worktrees)
+        app.state.recovery_items = app.state.recovery_service.load()
         app.state.schema_version = schema_version
         logger.info(
             "Runtime storage is ready.",
@@ -57,6 +60,7 @@ def create_app(
                 "context": {
                     "runtime_home_configured": runtime_home_configured,
                     "schema_version": schema_version,
+                    "recovery_jobs": len(app.state.recovery_items),
                 },
             },
         )

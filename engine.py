@@ -143,6 +143,26 @@ class JobRuntime(StrEnum):
     LOCAL = "local"
 
 
+class RecoveryAction(StrEnum):
+    SAFE_RESUME = "safe_resume"
+    WAIT_FOR_INPUT = "wait_for_input"
+    WAIT_FOR_APPROVAL = "wait_for_approval"
+    READY_FOR_REVIEW = "ready_for_review"
+    READY_TO_APPLY = "ready_to_apply"
+    RECONCILE_IN_FLIGHT = "reconcile_in_flight"
+    NEEDS_ATTENTION = "needs_attention"
+
+
+class RecoveryIssue(StrEnum):
+    WORKTREE_REQUIRED = "worktree_required"
+    WORKTREE_UNAVAILABLE = "worktree_unavailable"
+    WORKTREE_OUTSIDE_RUNTIME = "worktree_outside_runtime"
+    APPROVAL_REQUIRED = "approval_required"
+    MULTIPLE_PENDING_APPROVALS = "multiple_pending_approvals"
+    APPROVAL_EXPIRED = "approval_expired"
+    UNEXPECTED_PENDING_APPROVAL = "unexpected_pending_approval"
+
+
 class ApprovalDecision(StrEnum):
     APPROVED = "approved"
     REJECTED = "rejected"
