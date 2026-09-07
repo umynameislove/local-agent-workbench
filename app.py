@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
@@ -10,6 +11,8 @@ from fastapi import FastAPI, Request
 from db import (
     ApprovalRepository,
     AtomicTransitionService,
+    BackupService,
+    BackupServiceError,
     Database,
     EventRepository,
     JobRepository,
@@ -106,7 +109,21 @@ def create_app(
 app = create_app()
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run the local agent workbench.")
+    commands = parser.add_subparsers(dest="command")
+    backup = commands.add_parser("backup", help="Create a verified SQLite backup.")
+    backup.add_argument("destination", type=Path, help="A new file outside source repositories.")
+    arguments = parser.parse_args(argv)
+    if arguments.command == "backup":
+        try:
+            runtime = resolve_runtime_home()
+            BackupService(Database(runtime.state_db)).create(arguments.destination)
+        except (BackupServiceError, OSError, ValueError):
+            parser.exit(1, "Backup failed. Check storage, destination and database integrity.\n")
+        print("Database backup created and verified.")
+        return
+
     import uvicorn
 
     uvicorn.run("app:app", host="127.0.0.1", port=8765, reload=False)

@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
+import sqlite3
+import subprocess
+import sys
 from pathlib import Path
 
 import httpx
 import pytest
 
-from app import create_app
+from app import create_app, main
 from db import (
     LATEST_SCHEMA_VERSION,
     ApprovalRepository,
     AtomicTransitionService,
+    Database,
     EventRepository,
     JobRepository,
     MemoryReferenceRepository,
@@ -148,3 +153,56 @@ def test_string_boolean_is_rejected() -> None:
                 ],
             }
         )
+
+
+def test_backup_command_creates_a_verified_snapshot(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    Database(runtime / "state.db").initialize()
+    destination = tmp_path / "snapshot.db"
+    result = subprocess.run(
+        [sys.executable, "app.py", "backup", str(destination)],
+        env={**os.environ, "AGENT_WORKBENCH_HOME": str(runtime)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "Database backup created and verified.\n"
+    assert result.stderr == ""
+    with sqlite3.connect(destination) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+        assert connection.execute("SELECT version FROM schema_version").fetchone() == (
+            LATEST_SCHEMA_VERSION,
+        )
+
+
+def test_backup_command_does_not_bootstrap_missing_source(tmp_path: Path) -> None:
+    runtime = tmp_path / "missing-runtime"
+    destination = tmp_path / "snapshot.db"
+    result = subprocess.run(
+        [sys.executable, "app.py", "backup", str(destination)],
+        env={**os.environ, "AGENT_WORKBENCH_HOME": str(runtime)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert "Backup failed" in result.stderr
+    assert str(tmp_path) not in result.stderr
+    assert not runtime.exists()
+    assert not destination.exists()
+
+
+def test_default_command_still_starts_local_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
+
+    start_server = Mock()
+    monkeypatch.setattr("uvicorn.run", start_server)
+
+    main([])
+
+    start_server.assert_called_once_with("app:app", host="127.0.0.1", port=8765, reload=False)
