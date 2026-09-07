@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import os
 import sqlite3
+import tempfile
+import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -189,6 +193,10 @@ class MemoryReferenceNotFoundError(MemoryReferenceRepositoryError):
 
 class RecoveryServiceError(DatabaseError):
     """Raised when durable restart state cannot be loaded safely."""
+
+
+class BackupServiceError(DatabaseError):
+    """Raised when a verified database backup cannot be created safely."""
 
 
 @dataclass(frozen=True)
@@ -982,6 +990,277 @@ class Database:
         if not isinstance(version, int) or version < 0:
             raise DatabaseVersionError("Schema version metadata is invalid.")
         return version
+
+
+class BackupService:
+    """Create a verified snapshot without replacing existing files."""
+
+    _DEFAULT_TIMEOUT = 5.0
+    _BACKUP_PAGES = 128
+    _BACKUP_SLEEP = 0.01
+    _PROGRESS_OPS = 1_000
+    _SOURCE_SIDECARS = ("", "-wal", "-shm", "-journal")
+
+    def __init__(self, database: Database, *, timeout: float = _DEFAULT_TIMEOUT) -> None:
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+            raise ValueError("Backup timeout must be a positive finite number.")
+        if not math.isfinite(float(timeout)) or float(timeout) <= 0:
+            raise ValueError("Backup timeout must be a positive finite number.")
+        self.database = database
+        self.timeout = float(timeout)
+
+    def create(self, destination: Path) -> Path:
+        """Create and return a verified backup at a new destination path."""
+
+        deadline = time.monotonic() + self.timeout
+        destination_path = Path(destination)
+        destination_real, destination_parent = self._validate_destination(destination_path)
+        source_path = self._validate_source()
+        temporary_path: Path | None = None
+        source_connection: sqlite3.Connection | None = None
+        destination_connection: sqlite3.Connection | None = None
+
+        try:
+            source_connection = self._open_source(source_path, deadline)
+            try:
+                source_version = Database._read_schema_version(source_connection)
+            except DatabaseError as error:
+                raise BackupServiceError("Backup source schema metadata is invalid.") from error
+            if source_version != self.database.latest_schema_version:
+                raise BackupServiceError("Backup source schema is incompatible.")
+
+            temporary_path = self._create_temporary(destination_parent, destination_path)
+            destination_connection = sqlite3.connect(
+                temporary_path,
+                timeout=self._remaining(deadline),
+                isolation_level=None,
+            )
+            destination_connection.execute("PRAGMA foreign_keys = ON")
+            destination_connection.execute(
+                f"PRAGMA busy_timeout = {self._busy_timeout_ms(deadline)}"
+            )
+
+            def backup_progress(_status: int, _remaining: int, _total: int) -> None:
+                if time.monotonic() >= deadline:
+                    raise BackupServiceError("Backup timed out.")
+
+            try:
+                source_connection.backup(
+                    destination_connection,
+                    pages=self._BACKUP_PAGES,
+                    progress=backup_progress,
+                    sleep=self._BACKUP_SLEEP,
+                )
+            except sqlite3.Error as error:
+                if time.monotonic() >= deadline:
+                    raise BackupServiceError("Backup timed out.") from error
+                raise BackupServiceError("Backup could not be copied safely.") from error
+            if time.monotonic() >= deadline:
+                raise BackupServiceError("Backup timed out.")
+
+            self._verify(destination_connection, source_version, deadline)
+            journal_mode = destination_connection.execute("PRAGMA journal_mode = DELETE").fetchone()
+            if journal_mode is None or str(journal_mode[0]).lower() != "delete":
+                raise BackupServiceError("Backup journal mode could not be finalized safely.")
+            destination_connection.close()
+            destination_connection = None
+            self._remove_sidecars(temporary_path)
+            self._publish(temporary_path, destination_real)
+            temporary_path = None
+            return destination_path
+        except BackupServiceError:
+            raise
+        except (OSError, sqlite3.Error, ValueError) as error:
+            if time.monotonic() >= deadline:
+                raise BackupServiceError("Backup timed out.") from error
+            raise BackupServiceError("Backup could not be created safely.") from error
+        finally:
+            if destination_connection is not None:
+                destination_connection.close()
+            if source_connection is not None:
+                source_connection.close()
+            if temporary_path is not None:
+                self._remove_temporary(temporary_path)
+
+    def _validate_source(self) -> Path:
+        source = Path(self.database.path)
+        if source.is_symlink():
+            raise BackupServiceError("Backup source aliases are not allowed.")
+        if not source.is_file():
+            raise BackupServiceError("Backup source database is unavailable.")
+        try:
+            resolved = source.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise BackupServiceError("Backup source database is unavailable.") from error
+        if not resolved.is_file():
+            raise BackupServiceError("Backup source database is unavailable.")
+        return resolved
+
+    def _validate_destination(self, destination: Path) -> tuple[Path, Path]:
+        try:
+            if any(
+                os.path.lexists(Path(f"{destination}{suffix}")) for suffix in self._SOURCE_SIDECARS
+            ):
+                raise BackupServiceError("Backup destination must be a new file.")
+            parent = destination.parent
+            if not parent.is_dir():
+                raise BackupServiceError("Backup destination parent is unavailable.")
+            resolved_parent = parent.resolve(strict=True)
+            resolved_destination = resolved_parent / destination.name
+        except BackupServiceError:
+            raise
+        except (OSError, RuntimeError) as error:
+            raise BackupServiceError("Backup destination is unavailable.") from error
+
+        if self._public_repository_root(resolved_destination) is not None:
+            raise BackupServiceError("Backup destination must be outside a public repository.")
+
+        source = Path(self.database.path)
+        try:
+            resolved_source = source.resolve(strict=False)
+        except (OSError, RuntimeError) as error:
+            raise BackupServiceError("Backup source database is unavailable.") from error
+        source_candidates = {Path(f"{resolved_source}{suffix}") for suffix in self._SOURCE_SIDECARS}
+        if resolved_destination in source_candidates:
+            raise BackupServiceError("Backup destination conflicts with source database files.")
+        return resolved_destination, resolved_parent
+
+    @staticmethod
+    def _public_repository_root(path: Path) -> Path | None:
+        current = path if path.is_dir() else path.parent
+        for parent in (current, *current.parents):
+            marker = parent / ".git"
+            if marker.is_dir() or marker.is_file():
+                return parent
+        return None
+
+    def _open_source(self, source: Path, deadline: float) -> sqlite3.Connection:
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(
+                f"{source.as_uri()}?mode=ro",
+                uri=True,
+                timeout=self._remaining(deadline),
+                isolation_level=None,
+            )
+            connection.execute(f"PRAGMA busy_timeout = {self._busy_timeout_ms(deadline)}")
+            connection.execute("PRAGMA foreign_keys = ON")
+            return connection
+        except (OSError, sqlite3.Error, ValueError, BackupServiceError) as error:
+            if connection is not None:
+                connection.close()
+            raise BackupServiceError("Backup source database could not be opened.") from error
+
+    def _create_temporary(self, parent: Path, destination: Path) -> Path:
+        descriptor = -1
+        temporary: Path | None = None
+        try:
+            descriptor, name = tempfile.mkstemp(
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                dir=parent,
+            )
+            temporary = Path(name)
+            os.close(descriptor)
+            descriptor = -1
+            return temporary
+        except OSError as error:
+            if descriptor >= 0:
+                os.close(descriptor)
+            if temporary is not None:
+                self._remove_temporary(temporary)
+            raise BackupServiceError("Backup temporary storage is unavailable.") from error
+
+    def _verify(
+        self,
+        connection: sqlite3.Connection,
+        expected_version: int,
+        deadline: float,
+    ) -> None:
+        state = {"timed_out": False}
+
+        def progress() -> int:
+            if time.monotonic() >= deadline:
+                state["timed_out"] = True
+                return 1
+            return 0
+
+        connection.set_progress_handler(progress, self._PROGRESS_OPS)
+        try:
+            try:
+                stored_version = Database._read_schema_version(connection)
+                if stored_version != expected_version:
+                    raise BackupServiceError("Backup schema metadata is incompatible.")
+                integrity = connection.execute("PRAGMA integrity_check").fetchall()
+                if integrity != [("ok",)]:
+                    raise BackupServiceError("Backup integrity verification failed.")
+                foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
+                if foreign_keys:
+                    raise BackupServiceError("Backup foreign key verification failed.")
+            except BackupServiceError:
+                raise
+            except DatabaseError as error:
+                raise BackupServiceError("Backup schema metadata is invalid.") from error
+            except sqlite3.Error as error:
+                if state["timed_out"] or time.monotonic() >= deadline:
+                    raise BackupServiceError("Backup timed out.") from error
+                raise BackupServiceError("Backup integrity verification failed.") from error
+            if state["timed_out"] or time.monotonic() >= deadline:
+                raise BackupServiceError("Backup timed out.")
+        finally:
+            connection.set_progress_handler(None, 0)
+
+    def _publish(self, temporary: Path, destination: Path) -> None:
+        if any(os.path.lexists(Path(f"{destination}{suffix}")) for suffix in self._SOURCE_SIDECARS):
+            raise BackupServiceError("Backup destination must be a new file.")
+        try:
+            descriptor = os.open(temporary, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except OSError as error:
+            raise BackupServiceError("Backup could not be synchronized safely.") from error
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError as error:
+            raise BackupServiceError("Backup destination must be a new file.") from error
+        except OSError as error:
+            raise BackupServiceError("Backup could not be published safely.") from error
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise BackupServiceError("Backup publication cleanup failed.") from error
+
+    @staticmethod
+    def _remove_sidecars(path: Path) -> None:
+        for suffix in ("-wal", "-shm", "-journal"):
+            try:
+                Path(f"{path}{suffix}").unlink()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                continue
+
+    def _remove_temporary(self, path: Path) -> None:
+        self._remove_sidecars(path)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise BackupServiceError("Backup timed out.")
+        return remaining
+
+    def _busy_timeout_ms(self, deadline: float) -> int:
+        return max(0, min(100, int(self._remaining(deadline) * 1000)))
 
 
 class _Repository:

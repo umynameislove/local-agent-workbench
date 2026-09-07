@@ -69,6 +69,18 @@ uv run ruff format --check .
 uv run pytest
 ```
 
+## Database backup
+
+Create a consistent snapshot of the existing runtime database while the application is running:
+
+```bash
+AGENT_WORKBENCH_HOME=../working-local uv run python app.py backup ../working-local/state-backup.db
+```
+
+The destination parent must already exist. Each backup requires a new filename outside source repositories. Existing files are never replaced. The command checks database integrity before publishing the snapshot and exits unsuccessfully if verification fails. It does not initialize or migrate the source database.
+
+Backups contain private application data. Store them in a protected local directory. The snapshot covers SQLite records only; configuration, credentials, worktree files and external `projmem` content require separate backups. Recovery must be tested in an isolated runtime before replacing live data.
+
 ## Cost boundary
 
 1. Claude Code and Codex: user's existing native subscriptions.
