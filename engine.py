@@ -10,7 +10,7 @@ from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 
 APP_VERSION = "0.1.0"
 RUNTIME_ENV = "AGENT_WORKBENCH_HOME"
@@ -212,6 +212,88 @@ class ProviderCapabilities:
         )
         if missing:
             raise ProviderCapabilityError(self.runtime, missing)
+
+
+class AdapterError(RuntimeError):
+    """Report a sanitized adapter failure without raw provider output."""
+
+
+class AdapterUnsupportedError(AdapterError):
+    """Report an operation that the adapter cannot perform."""
+
+
+class AdapterHealth(StrEnum):
+    READY = "ready"
+    UNAVAILABLE = "unavailable"
+    UNKNOWN = "unknown"
+
+
+def _adapter_text(value: str, field: str) -> None:
+    if not isinstance(value, str) or not value.strip() or "\x00" in value:
+        raise ValueError(f"Adapter {field} must be nonempty text without null characters.")
+
+
+@dataclass(frozen=True)
+class AdapterSession:
+    job_id: str
+    runtime: JobRuntime
+    session_id: str
+
+    def __post_init__(self) -> None:
+        _adapter_text(self.job_id, "job_id")
+        _adapter_text(self.session_id, "session_id")
+        if not isinstance(self.runtime, JobRuntime) or self.runtime is JobRuntime.AUTO:
+            raise ValueError("Adapter sessions require a concrete runtime.")
+
+
+@dataclass(frozen=True)
+class AdapterStart:
+    job_id: str
+    request: str
+    worktree: Path
+    required: frozenset[ProviderCapability] = frozenset()
+
+    def __post_init__(self) -> None:
+        _adapter_text(self.job_id, "job_id")
+        _adapter_text(self.request, "request")
+        if not isinstance(self.worktree, Path) or not self.worktree.is_absolute():
+            raise ValueError("Adapter worktree must be an absolute Path.")
+        if not isinstance(self.required, frozenset) or any(
+            not isinstance(item, ProviderCapability) for item in self.required
+        ):
+            raise TypeError("Adapter requirements must be typed immutable capabilities.")
+
+
+class ProviderAdapter(Protocol):
+    """Async control boundary; implementations keep provider SDK types private.
+
+    Session methods must reject mismatched runtime or job identity. Unsupported
+    operations raise AdapterUnsupportedError. Implementations translate provider
+    failures to sanitized AdapterError and preserve task cancellation.
+    """
+
+    @property
+    def capabilities(self) -> ProviderCapabilities: ...
+
+    async def start(self, request: AdapterStart) -> AdapterSession:
+        """Check required capabilities before starting work and return its session."""
+        ...
+
+    async def send(self, session: AdapterSession, message: str) -> None:
+        """Accept input for the existing session; acknowledgement is not completion."""
+        ...
+
+    async def cancel(self, session: AdapterSession) -> None:
+        """Request cancellation; repeated requests must be safe."""
+        ...
+
+    async def health(self) -> AdapterHealth:
+        """Return observed readiness, using unknown when no observation exists."""
+        ...
+
+    async def resume(self, session: AdapterSession) -> AdapterSession:
+        """Reconnect the same durable session without silently starting a new job."""
+        ...
 
 
 class RecoveryAction(StrEnum):
