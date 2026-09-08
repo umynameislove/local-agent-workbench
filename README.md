@@ -69,6 +69,12 @@ uv run ruff format --check .
 uv run pytest
 ```
 
+## Provider capabilities
+
+`ProviderCapabilities` describes a concrete runtime's support for planning, tools, files, streaming and cost reporting. Each capability is explicitly supported, unsupported or unknown; omitted declarations remain unknown. Call `require()` with the task's required capabilities before invoking an adapter. Unsupported or unknown requirements raise `ProviderCapabilityError` with the missing capabilities.
+
+Declarations are immutable snapshots supplied by adapters. This contract does not assign capabilities to real providers, check authentication or health, grant file permissions, or determine prices and remaining quota. Those checks remain separate routing responsibilities.
+
 ## Database backup
 
 Create a consistent snapshot of the existing runtime database while the application is running:
