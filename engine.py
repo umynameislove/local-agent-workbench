@@ -143,6 +143,77 @@ class JobRuntime(StrEnum):
     LOCAL = "local"
 
 
+class ProviderCapability(StrEnum):
+    PLAN = "plan"
+    TOOLS = "tools"
+    FILES = "files"
+    STREAMING = "streaming"
+    COST_REPORTING = "cost_reporting"
+
+
+class CapabilitySupport(StrEnum):
+    SUPPORTED = "supported"
+    UNSUPPORTED = "unsupported"
+    UNKNOWN = "unknown"
+
+
+class ProviderCapabilityError(ValueError):
+    """Raised when a runtime cannot satisfy required capabilities."""
+
+    def __init__(self, runtime: JobRuntime, missing: tuple[ProviderCapability, ...]) -> None:
+        self.runtime = runtime
+        self.missing = missing
+        super().__init__(
+            f"Runtime {runtime.value} lacks confirmed capabilities: "
+            + ", ".join(capability.value for capability in missing)
+        )
+
+
+@dataclass(frozen=True)
+class ProviderCapabilities:
+    """Describe adapter capabilities without granting execution permission."""
+
+    runtime: JobRuntime
+    support: Mapping[ProviderCapability, CapabilitySupport]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.runtime, JobRuntime) or self.runtime is JobRuntime.AUTO:
+            raise ValueError("Capabilities require a concrete runtime.")
+        if not isinstance(self.support, Mapping):
+            raise TypeError("Capability support must be a mapping.")
+        snapshot = dict(self.support)
+        if any(
+            not isinstance(key, ProviderCapability) or not isinstance(value, CapabilitySupport)
+            for key, value in snapshot.items()
+        ):
+            raise TypeError("Capability entries must use typed capability and support values.")
+        object.__setattr__(
+            self,
+            "support",
+            MappingProxyType(
+                {
+                    capability: snapshot.get(capability, CapabilitySupport.UNKNOWN)
+                    for capability in ProviderCapability
+                }
+            ),
+        )
+
+    def require(self, required: frozenset[ProviderCapability]) -> None:
+        """Reject unmet requirements before the caller invokes an adapter."""
+        if not isinstance(required, frozenset) or any(
+            not isinstance(capability, ProviderCapability) for capability in required
+        ):
+            raise TypeError("Requirements must be a frozenset of ProviderCapability values.")
+        missing = tuple(
+            capability
+            for capability in ProviderCapability
+            if capability in required
+            and self.support[capability] is not CapabilitySupport.SUPPORTED
+        )
+        if missing:
+            raise ProviderCapabilityError(self.runtime, missing)
+
+
 class RecoveryAction(StrEnum):
     SAFE_RESUME = "safe_resume"
     WAIT_FOR_INPUT = "wait_for_input"
