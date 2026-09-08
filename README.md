@@ -75,6 +75,8 @@ uv run pytest
 
 Declarations are immutable snapshots supplied by adapters. This contract does not assign capabilities to real providers, check authentication or health, grant file permissions, or determine prices and remaining quota. Those checks remain separate routing responsibilities.
 
+`ProviderAdapter` defines asynchronous `start`, `send`, `cancel`, `health` and `resume` operations using shared request, session and health types. Adapters must validate capabilities before starting work, reject mismatched sessions, sanitize provider errors and report unsupported operations explicitly. Cancellation acknowledgement does not imply completion, and resume reconnects an existing session without creating a replacement job. Event streaming and concrete provider connections are separate implementation steps.
+
 ## Database backup
 
 Create a consistent snapshot of the existing runtime database while the application is running:
