@@ -5,7 +5,7 @@ import os
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
@@ -294,6 +294,129 @@ class ProviderAdapter(Protocol):
     async def resume(self, session: AdapterSession) -> AdapterSession:
         """Reconnect the same durable session without silently starting a new job."""
         ...
+
+
+class RuntimeEventKind(StrEnum):
+    TEXT = "text"
+    PLAN = "plan"
+    TOOL = "tool"
+    FILE = "file"
+    USAGE = "usage"
+    QUESTION = "question"
+    ERROR = "error"
+    COMPLETION = "completion"
+
+
+@dataclass(frozen=True)
+class RuntimeEvent:
+    """Normalized adapter output, distinct from the persisted event ledger."""
+
+    job_id: str
+    sequence: int
+    runtime: JobRuntime
+    timestamp: datetime
+    kind: RuntimeEventKind
+    payload: Mapping[str, str | int | bool | None]
+
+    def __post_init__(self) -> None:
+        _adapter_text(self.job_id, "job_id")
+        if self.job_id != self.job_id.strip():
+            raise ValueError("Event job identity must not have surrounding whitespace.")
+        if type(self.sequence) is not int or self.sequence < 1:
+            raise ValueError("Event sequence must be a positive integer.")
+        if not isinstance(self.runtime, JobRuntime) or self.runtime is JobRuntime.AUTO:
+            raise ValueError("Event runtime must be concrete.")
+        if not isinstance(self.timestamp, datetime) or self.timestamp.utcoffset() is None:
+            raise ValueError("Event timestamp must include a timezone.")
+        if not isinstance(self.kind, RuntimeEventKind):
+            raise ValueError("Event kind must use RuntimeEventKind.")
+        if not isinstance(self.payload, Mapping):
+            raise ValueError("Event payload must be a mapping.")
+        payload = dict(self.payload)
+        fields = {
+            RuntimeEventKind.TEXT: {"text"},
+            RuntimeEventKind.PLAN: {"text"},
+            RuntimeEventKind.TOOL: {"call_id", "name", "status"},
+            RuntimeEventKind.FILE: {"path", "action"},
+            RuntimeEventKind.USAGE: {"input_tokens", "output_tokens", "cost_usd"},
+            RuntimeEventKind.QUESTION: {"question_id", "text"},
+            RuntimeEventKind.ERROR: {"code", "message", "retryable"},
+            RuntimeEventKind.COMPLETION: {"status"},
+        }
+        if payload.keys() != fields[self.kind]:
+            raise ValueError("Event payload fields do not match its kind.")
+        if self.kind is RuntimeEventKind.USAGE:
+            for field in ("input_tokens", "output_tokens"):
+                value = payload[field]
+                if value is not None and (type(value) is not int or value < 0):
+                    raise ValueError("Event token counts must be nonnegative integers or null.")
+            cost = payload["cost_usd"]
+            if cost is not None:
+                if not isinstance(cost, str):
+                    raise ValueError("Event cost must be a decimal string or null.")
+                try:
+                    amount = Decimal(cost)
+                except ArithmeticError as error:
+                    raise ValueError("Event cost is invalid.") from error
+                if not amount.is_finite() or amount < 0:
+                    raise ValueError("Event cost must be finite and nonnegative.")
+        else:
+            for field, value in payload.items():
+                if field == "retryable":
+                    if type(value) is not bool:
+                        raise ValueError("Event retryable must be a boolean.")
+                elif field == "text" and self.kind is RuntimeEventKind.TEXT:
+                    if not isinstance(value, str) or "\x00" in value:
+                        raise ValueError("Event text must be a string without null characters.")
+                else:
+                    _adapter_text(value, field)
+        choices = {
+            RuntimeEventKind.TOOL: ("status", {"started", "completed", "failed"}),
+            RuntimeEventKind.FILE: ("action", {"created", "modified", "deleted"}),
+            RuntimeEventKind.COMPLETION: ("status", {"completed", "failed", "cancelled"}),
+        }
+        if self.kind in choices:
+            field, allowed = choices[self.kind]
+            if payload[field] not in allowed:
+                raise ValueError("Event payload status or action is invalid.")
+        object.__setattr__(self, "timestamp", self.timestamp.astimezone(UTC))
+        object.__setattr__(self, "payload", MappingProxyType(payload))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "job_id": self.job_id,
+            "sequence": self.sequence,
+            "runtime": self.runtime.value,
+            "timestamp": self.timestamp.isoformat().replace("+00:00", "Z"),
+            "kind": self.kind.value,
+            "payload": dict(self.payload),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> RuntimeEvent:
+        if not isinstance(value, Mapping) or value.keys() != {
+            "job_id",
+            "sequence",
+            "runtime",
+            "timestamp",
+            "kind",
+            "payload",
+        }:
+            raise ValueError("Event envelope fields are invalid.")
+        try:
+            timestamp = value["timestamp"]
+            if not isinstance(timestamp, str):
+                raise ValueError("Event timestamp must be an ISO timestamp string.")
+            return cls(
+                job_id=value["job_id"],
+                sequence=value["sequence"],
+                runtime=JobRuntime(value["runtime"]),
+                timestamp=datetime.fromisoformat(timestamp),
+                kind=RuntimeEventKind(value["kind"]),
+                payload=value["payload"],
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("Runtime event is invalid.") from error
 
 
 class RecoveryAction(StrEnum):

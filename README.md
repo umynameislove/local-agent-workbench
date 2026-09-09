@@ -77,6 +77,10 @@ Declarations are immutable snapshots supplied by adapters. This contract does no
 
 `ProviderAdapter` defines asynchronous `start`, `send`, `cancel`, `health` and `resume` operations using shared request, session and health types. Adapters must validate capabilities before starting work, reject mismatched sessions, sanitize provider errors and report unsupported operations explicitly. Cancellation acknowledgement does not imply completion, and resume reconnects an existing session without creating a replacement job. Event streaming and concrete provider connections are separate implementation steps.
 
+`RuntimeEvent` normalizes text, plan, tool, file, usage, question, error and completion output. Its envelope requires a job identity, positive sequence, concrete runtime and timezone aware timestamp, serialized in UTC. Payload fields are specific to each event kind and reject unknown fields. Usage preserves unknown values as null and represents dollar costs as decimal strings. Tool events carry call identity, name and status; file events describe changes without authorizing file access. Provider adapters remain responsible for sanitizing content before emitting events.
+
+The schema validates individual events. Stream ordering, duplicate handling and persistence remain separate responsibilities; runtime events do not replace the SQLite event ledger.
+
 ## Database backup
 
 Create a consistent snapshot of the existing runtime database while the application is running:
