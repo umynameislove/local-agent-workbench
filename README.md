@@ -81,6 +81,8 @@ Declarations are immutable snapshots supplied by adapters. This contract does no
 
 The schema validates individual events. Stream ordering, duplicate handling and persistence remain separate responsibilities; runtime events do not replace the SQLite event ledger.
 
+`FakeProvider` supplies a deterministic demo through the adapter protocol. Its `events(session)` method returns an immutable snapshot containing a simulated plan, write proposal, verification message and review question. Sending `approve` or `reject` finishes the demo; cancellation is repeatable. Events use a fixed synthetic timestamp and clearly label simulated outcomes. The adapter does not execute tools, modify files, grant approvals or resume sessions after restart.
+
 ## Process execution
 
 `run_process()` executes a tuple of arguments without shell parsing, closes stdin and captures stdout and stderr separately. It returns nonzero exit codes as results. Timeout and task cancellation kill the POSIX process group and reap the direct child before returning control. Children that deliberately create another session are outside that process group.

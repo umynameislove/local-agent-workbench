@@ -510,6 +510,111 @@ class RuntimeEvent:
             raise ValueError("Runtime event is invalid.") from error
 
 
+class FakeProvider:
+    """Deterministic in memory demo adapter; never executes tools or writes files."""
+
+    def __init__(self) -> None:
+        self._capabilities = ProviderCapabilities(
+            JobRuntime.LOCAL,
+            {
+                ProviderCapability.PLAN: CapabilitySupport.SUPPORTED,
+                ProviderCapability.TOOLS: CapabilitySupport.UNSUPPORTED,
+                ProviderCapability.FILES: CapabilitySupport.UNSUPPORTED,
+                ProviderCapability.STREAMING: CapabilitySupport.UNSUPPORTED,
+                ProviderCapability.COST_REPORTING: CapabilitySupport.UNSUPPORTED,
+            },
+        )
+        self._sessions: dict[str, AdapterSession] = {}
+        self._events: dict[str, tuple[RuntimeEvent, ...]] = {}
+        self._finished: set[str] = set()
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return self._capabilities
+
+    def _check(self, session: AdapterSession) -> None:
+        if not isinstance(session, AdapterSession) or self._sessions.get(session.job_id) != session:
+            raise AdapterError("Unknown demo session.")
+
+    def _emit(self, session: AdapterSession, kind: RuntimeEventKind, payload: Mapping) -> None:
+        events = self._events[session.job_id]
+        event = RuntimeEvent(
+            session.job_id,
+            len(events) + 1,
+            session.runtime,
+            datetime(2000, 1, 1, tzinfo=UTC),
+            kind,
+            payload,
+        )
+        self._events[session.job_id] = (*events, event)
+
+    async def start(self, request: AdapterStart) -> AdapterSession:
+        if not isinstance(request, AdapterStart):
+            raise AdapterError("Demo start requires AdapterStart.")
+        if request.job_id != request.job_id.strip():
+            raise AdapterError("Demo job identity must not have surrounding whitespace.")
+        self.capabilities.require(request.required)
+        if request.job_id in self._sessions:
+            raise AdapterError("Demo job already started.")
+        session = AdapterSession(request.job_id, JobRuntime.LOCAL, f"fake:{request.job_id}")
+        self._sessions[request.job_id] = session
+        self._events[request.job_id] = ()
+        for kind, payload in (
+            (
+                RuntimeEventKind.PLAN,
+                {"text": "Demo plan: inspect, propose, verify, request review."},
+            ),
+            (
+                RuntimeEventKind.TEXT,
+                {"text": "Demo write proposal: add a greeting. No files changed."},
+            ),
+            (
+                RuntimeEventKind.TEXT,
+                {"text": "Demo verification: simulated pass. No tests executed."},
+            ),
+            (
+                RuntimeEventKind.QUESTION,
+                {
+                    "question_id": "demo-review",
+                    "text": "Demo review: send approve or reject. No real changes will be applied.",
+                },
+            ),
+        ):
+            self._emit(session, kind, payload)
+        return session
+
+    def events(self, session: AdapterSession) -> tuple[RuntimeEvent, ...]:
+        """Return a replayable snapshot; this is not the production streaming contract."""
+        self._check(session)
+        return self._events[session.job_id]
+
+    async def send(self, session: AdapterSession, message: str) -> None:
+        self._check(session)
+        if session.job_id in self._finished:
+            raise AdapterError("Demo session has ended.")
+        if message not in ("approve", "reject"):
+            raise AdapterError("Demo input must be approve or reject.")
+        self._emit(
+            session,
+            RuntimeEventKind.COMPLETION,
+            {"status": "completed" if message == "approve" else "cancelled"},
+        )
+        self._finished.add(session.job_id)
+
+    async def cancel(self, session: AdapterSession) -> None:
+        self._check(session)
+        if session.job_id not in self._finished:
+            self._emit(session, RuntimeEventKind.COMPLETION, {"status": "cancelled"})
+            self._finished.add(session.job_id)
+
+    async def health(self) -> AdapterHealth:
+        return AdapterHealth.READY
+
+    async def resume(self, session: AdapterSession) -> AdapterSession:
+        self._check(session)
+        raise AdapterUnsupportedError("Demo sessions do not support durable resume.")
+
+
 class RecoveryAction(StrEnum):
     SAFE_RESUME = "safe_resume"
     WAIT_FOR_INPUT = "wait_for_input"
