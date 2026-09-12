@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import math
 import os
+import signal
 import sys
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -16,6 +20,93 @@ APP_VERSION = "0.1.0"
 RUNTIME_ENV = "AGENT_WORKBENCH_HOME"
 CONSULTANT_MODEL = "deepseek/deepseek-v4-flash-0731"
 CONSULTANT_RECOMMENDATIONS = frozenset({"codex", "claude", "local", "ask_user"})
+
+
+class ProcessRunnerError(RuntimeError):
+    """Report process failures without exposing command arguments or output."""
+
+
+class ProcessTimeoutError(ProcessRunnerError):
+    """Raised after a timed out process has been terminated and reaped."""
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
+
+
+async def run_process(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    timeout: float = 60.0,
+) -> ProcessResult:
+    """Run structured arguments on POSIX and reap the process group on cancellation.
+
+    Output is captured for bounded commands, not continuous provider streams.
+    Nonzero exit codes are returned to the caller as ordinary results.
+    """
+    if os.name != "posix":
+        raise ProcessRunnerError("Process groups require a POSIX platform.")
+    if (
+        not isinstance(argv, tuple)
+        or not argv
+        or any(not isinstance(arg, str) or "\x00" in arg for arg in argv)
+        or not argv[0]
+    ):
+        raise ValueError("Process arguments must be a nonempty tuple of strings.")
+    if not isinstance(cwd, Path) or not cwd.is_absolute() or not cwd.is_dir():
+        raise ValueError("Process working directory must be an existing absolute Path.")
+    if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError("Process timeout must be finite and positive.")
+
+    async def reap(process: asyncio.subprocess.Process) -> None:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+
+    async def finish(task: asyncio.Task) -> object:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+        return task.result()
+
+    spawn = asyncio.create_task(
+        asyncio.create_subprocess_exec(
+            *argv,
+            cwd=cwd,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+    )
+    try:
+        process = await asyncio.shield(spawn)
+    except asyncio.CancelledError:
+        try:
+            process = await finish(spawn)
+        except OSError:
+            raise asyncio.CancelledError from None
+        await finish(asyncio.create_task(reap(process)))
+        raise
+    except OSError:
+        raise ProcessRunnerError("Process could not be started.") from None
+
+    communication = asyncio.create_task(process.communicate())
+    try:
+        stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout)
+        return ProcessResult(process.returncode, stdout, stderr)
+    except (asyncio.CancelledError, TimeoutError) as error:
+        await finish(asyncio.create_task(reap(process)))
+        await finish(communication)
+        if isinstance(error, asyncio.CancelledError):
+            raise
+        raise ProcessTimeoutError("Process timed out.") from None
 
 
 class ConfigurationError(ValueError):

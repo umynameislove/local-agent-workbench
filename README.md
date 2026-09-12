@@ -81,6 +81,12 @@ Declarations are immutable snapshots supplied by adapters. This contract does no
 
 The schema validates individual events. Stream ordering, duplicate handling and persistence remain separate responsibilities; runtime events do not replace the SQLite event ledger.
 
+## Process execution
+
+`run_process()` executes a tuple of arguments without shell parsing, closes stdin and captures stdout and stderr separately. It returns nonzero exit codes as results. Timeout and task cancellation kill the POSIX process group and reap the direct child before returning control. Children that deliberately create another session are outside that process group.
+
+This runner targets macOS and Linux commands with bounded output; captured output is held in memory. It is not a sandbox, a command authorization policy or a continuous streaming interface. Callers must select permitted executables and treat captured output as potentially sensitive.
+
 ## Database backup
 
 Create a consistent snapshot of the existing runtime database while the application is running:
