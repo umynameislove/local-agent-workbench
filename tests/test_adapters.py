@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import get_type_hints
 
@@ -8,7 +9,6 @@ import pytest
 
 from engine import (
     AdapterError,
-    AdapterHealth,
     AdapterSession,
     AdapterStart,
     AdapterUnsupportedError,
@@ -18,6 +18,8 @@ from engine import (
     ProviderCapabilities,
     ProviderCapability,
     ProviderCapabilityError,
+    ProviderHealth,
+    ProviderHealthState,
 )
 
 
@@ -54,8 +56,11 @@ class FakeAdapter:
         self.check(session)
         self.cancelled = True
 
-    async def health(self) -> AdapterHealth:
-        return AdapterHealth.READY
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            ProviderHealthState.AVAILABLE,
+            datetime(2000, 1, 1, tzinfo=UTC),
+        )
 
     async def resume(self, session: AdapterSession) -> AdapterSession:
         self.check(session)
@@ -66,7 +71,7 @@ class FakeAdapter:
 async def test_shared_protocol_controls_adapter_without_sdk_types(tmp_path: Path) -> None:
     fake = FakeAdapter()
     adapter: ProviderAdapter = fake
-    assert await adapter.health() is AdapterHealth.READY
+    assert (await adapter.health()).state is ProviderHealthState.AVAILABLE
     session = await adapter.start(AdapterStart("job", "Plan work", tmp_path))
     await adapter.send(session, "Continue")
     assert fake.messages == ["Continue"]
@@ -109,7 +114,7 @@ def test_protocol_signatures_are_async_and_use_shared_contracts() -> None:
         "start": {"request": AdapterStart, "return": AdapterSession},
         "send": {"session": AdapterSession, "message": str, "return": type(None)},
         "cancel": {"session": AdapterSession, "return": type(None)},
-        "health": {"return": AdapterHealth},
+        "health": {"return": ProviderHealth},
         "resume": {"session": AdapterSession, "return": AdapterSession},
     }
     for name, hints in expected.items():
