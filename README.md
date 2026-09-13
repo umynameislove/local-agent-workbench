@@ -77,6 +77,8 @@ Declarations are immutable snapshots supplied by adapters. This contract does no
 
 `ProviderAdapter` defines asynchronous `start`, `send`, `cancel`, `health` and `resume` operations using shared request, session and health types. Adapters must validate capabilities before starting work, reject mismatched sessions, sanitize provider errors and report unsupported operations explicitly. Cancellation acknowledgement does not imply completion, and resume reconnects an existing session without creating a replacement job. Event streaming and concrete provider connections are separate implementation steps.
 
+`ProviderHealth` reports one observed provider state as available, unavailable, rate limited or degraded. Every observation carries a timezone aware `observed_at` value and may include a provider supplied future `reset_at` value. The contract does not contain quota percentages or infer values that a provider did not report.
+
 `RuntimeEvent` normalizes text, plan, tool, file, usage, question, error and completion output. Its envelope requires a job identity, positive sequence, concrete runtime and timezone aware timestamp, serialized in UTC. Payload fields are specific to each event kind and reject unknown fields. Usage preserves unknown values as null and represents dollar costs as decimal strings. Tool events carry call identity, name and status; file events describe changes without authorizing file access. Provider adapters remain responsible for sanitizing content before emitting events.
 
 The schema validates individual events. Stream ordering, duplicate handling and persistence remain separate responsibilities; runtime events do not replace the SQLite event ledger.
@@ -86,6 +88,8 @@ The schema validates individual events. Stream ordering, duplicate handling and 
 The normalizer does not persist events, change durable job state, authorize provider activity or interpret a provider native protocol. Each native adapter remains responsible for translating its own output into the small JSON Lines fragment contract before normalization.
 
 `FakeProvider` supplies a deterministic demo through the adapter protocol. Its `events(session)` method returns an immutable snapshot containing a simulated plan, write proposal, verification message and review question. Sending `approve` or `reject` finishes the demo; cancellation is repeatable. Events use a fixed synthetic timestamp and clearly label simulated outcomes. The adapter does not execute tools, modify files, grant approvals or resume sessions after restart.
+
+`CancellationService` validates provider and durable job identity before requesting cancellation. Acknowledgement alone does not change durable state. Only a matching normalized completion event with cancelled status permits one atomic terminal transition through a job scoped idempotency key. Retries return the committed event, conflicts fail closed, and cancellation preserves the recorded worktree for later review and cleanup policy.
 
 ## Process execution
 

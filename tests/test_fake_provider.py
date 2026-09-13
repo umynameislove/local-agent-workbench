@@ -5,7 +5,6 @@ import pytest
 
 from engine import (
     AdapterError,
-    AdapterHealth,
     AdapterSession,
     AdapterStart,
     AdapterUnsupportedError,
@@ -14,6 +13,7 @@ from engine import (
     ProviderAdapter,
     ProviderCapability,
     ProviderCapabilityError,
+    ProviderHealthState,
     RuntimeEvent,
 )
 
@@ -36,7 +36,10 @@ async def test_golden_events_are_deterministic_and_have_no_file_effects(tmp_path
     for _ in range(2):
         provider = FakeProvider()
         adapter: ProviderAdapter = provider
-        assert await adapter.health() is AdapterHealth.READY
+        health = await adapter.health()
+        assert health.state is ProviderHealthState.AVAILABLE
+        assert health.observed_at.isoformat() == "2000-01-01T00:00:00+00:00"
+        assert health.reset_at is None
         session = await adapter.start(AdapterStart("job", "Demo", tmp_path))
         events = [event.to_dict() for event in provider.events(session)]
         assert events == [

@@ -313,10 +313,68 @@ class AdapterUnsupportedError(AdapterError):
     """Report an operation that the adapter cannot perform."""
 
 
-class AdapterHealth(StrEnum):
-    READY = "ready"
+class ProviderHealthState(StrEnum):
+    AVAILABLE = "available"
     UNAVAILABLE = "unavailable"
-    UNKNOWN = "unknown"
+    RATE_LIMITED = "rate_limited"
+    DEGRADED = "degraded"
+
+
+@dataclass(frozen=True)
+class ProviderHealth:
+    """Represent one truthful, time bounded provider health observation."""
+
+    state: ProviderHealthState
+    observed_at: datetime
+    reset_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.state, ProviderHealthState):
+            raise ValueError("Provider health state must use ProviderHealthState.")
+        if not isinstance(self.observed_at, datetime) or self.observed_at.utcoffset() is None:
+            raise ValueError("Provider health observation time must include a timezone.")
+        observed_at = self.observed_at.astimezone(UTC)
+        reset_at = self.reset_at
+        if reset_at is not None:
+            if not isinstance(reset_at, datetime) or reset_at.utcoffset() is None:
+                raise ValueError("Provider health reset time must include a timezone.")
+            reset_at = reset_at.astimezone(UTC)
+            if reset_at <= observed_at:
+                raise ValueError("Provider health reset time must follow its observation.")
+        object.__setattr__(self, "observed_at", observed_at)
+        object.__setattr__(self, "reset_at", reset_at)
+
+    def to_dict(self) -> dict[str, str | None]:
+        return {
+            "state": self.state.value,
+            "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
+            "reset_at": (
+                None if self.reset_at is None else self.reset_at.isoformat().replace("+00:00", "Z")
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ProviderHealth:
+        if not isinstance(value, Mapping) or value.keys() != {
+            "state",
+            "observed_at",
+            "reset_at",
+        }:
+            raise ValueError("Provider health fields are invalid.")
+        try:
+            observed_at = value["observed_at"]
+            reset_at = value["reset_at"]
+            if not isinstance(observed_at, str):
+                raise ValueError
+            if reset_at is not None and not isinstance(reset_at, str):
+                raise ValueError
+            return cls(
+                state=ProviderHealthState(value["state"]),
+                observed_at=datetime.fromisoformat(observed_at),
+                reset_at=None if reset_at is None else datetime.fromisoformat(reset_at),
+            )
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError("Provider health is invalid.") from error
 
 
 def _adapter_text(value: str, field: str) -> None:
@@ -378,8 +436,8 @@ class ProviderAdapter(Protocol):
         """Request cancellation; repeated requests must be safe."""
         ...
 
-    async def health(self) -> AdapterHealth:
-        """Return observed readiness, using unknown when no observation exists."""
+    async def health(self) -> ProviderHealth:
+        """Return a timestamped observation without inferring quota information."""
         ...
 
     async def resume(self, session: AdapterSession) -> AdapterSession:
@@ -761,8 +819,11 @@ class FakeProvider:
             self._emit(session, RuntimeEventKind.COMPLETION, {"status": "cancelled"})
             self._finished.add(session.job_id)
 
-    async def health(self) -> AdapterHealth:
-        return AdapterHealth.READY
+    async def health(self) -> ProviderHealth:
+        return ProviderHealth(
+            ProviderHealthState.AVAILABLE,
+            datetime(2000, 1, 1, tzinfo=UTC),
+        )
 
     async def resume(self, session: AdapterSession) -> AdapterSession:
         self._check(session)
