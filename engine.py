@@ -510,6 +510,160 @@ class RuntimeEvent:
             raise ValueError("Runtime event is invalid.") from error
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("Provider stream JSON contains a duplicate field.")
+        value[key] = item
+    return value
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Provider stream JSON constant is invalid: {value}")
+
+
+class RuntimeEventStreamNormalizer:
+    """Convert bounded UTF-8 JSON lines into ordered runtime events.
+
+    Each provider line contains only ``kind`` and ``payload``. Job identity,
+    runtime, sequence and observation time remain owned by the application.
+    Malformed input becomes a sanitized error event so later lines can proceed.
+    """
+
+    def __init__(
+        self,
+        session: AdapterSession,
+        *,
+        first_sequence: int = 1,
+        max_line_bytes: int = 1_048_576,
+    ) -> None:
+        if not isinstance(session, AdapterSession):
+            raise TypeError("Stream normalization requires an AdapterSession.")
+        if type(first_sequence) is not int or first_sequence < 1:
+            raise ValueError("First event sequence must be a positive integer.")
+        if type(max_line_bytes) is not int or max_line_bytes < 1:
+            raise ValueError("Maximum stream line size must be a positive integer.")
+        self._session = session
+        self._next_sequence = first_sequence
+        self._max_line_bytes = max_line_bytes
+        self._buffer = bytearray()
+        self._discarding_oversized_line = False
+        self._finished = False
+
+    def _event(
+        self,
+        kind: RuntimeEventKind,
+        payload: Mapping[str, str | int | bool | None],
+    ) -> RuntimeEvent:
+        event = RuntimeEvent(
+            job_id=self._session.job_id,
+            sequence=self._next_sequence,
+            runtime=self._session.runtime,
+            timestamp=datetime.now(UTC),
+            kind=kind,
+            payload=payload,
+        )
+        self._next_sequence += 1
+        return event
+
+    def _error(self, code: str, message: str) -> RuntimeEvent:
+        return self._event(
+            RuntimeEventKind.ERROR,
+            {"code": code, "message": message, "retryable": False},
+        )
+
+    def _parse_line(self, line: bytes) -> RuntimeEvent:
+        try:
+            text = line.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._error(
+                "stream_invalid_encoding",
+                "Provider stream contained invalid UTF-8.",
+            )
+        try:
+            value = json.loads(
+                text,
+                object_pairs_hook=_unique_json_object,
+                parse_constant=_reject_json_constant,
+            )
+        except (json.JSONDecodeError, RecursionError, ValueError):
+            return self._error(
+                "stream_invalid_json",
+                "Provider stream contained invalid JSON.",
+            )
+        if not isinstance(value, dict) or value.keys() != {"kind", "payload"}:
+            return self._error(
+                "stream_invalid_event",
+                "Provider stream message violated the event contract.",
+            )
+        try:
+            return self._event(RuntimeEventKind(value["kind"]), value["payload"])
+        except (TypeError, ValueError):
+            return self._error(
+                "stream_invalid_event",
+                "Provider stream message violated the event contract.",
+            )
+
+    def feed(self, chunk: bytes) -> tuple[RuntimeEvent, ...]:
+        """Consume one byte chunk and return every complete event in order."""
+        if self._finished:
+            raise RuntimeError("Provider stream has already finished.")
+        if not isinstance(chunk, bytes):
+            raise TypeError("Provider stream chunks must be bytes.")
+        if not chunk:
+            return ()
+        self._buffer.extend(chunk)
+        events: list[RuntimeEvent] = []
+        while True:
+            newline = self._buffer.find(b"\n")
+            if newline < 0:
+                if len(self._buffer) > self._max_line_bytes:
+                    self._buffer.clear()
+                    if not self._discarding_oversized_line:
+                        self._discarding_oversized_line = True
+                        events.append(
+                            self._error(
+                                "stream_message_too_large",
+                                "Provider stream message exceeded the configured size limit.",
+                            )
+                        )
+                break
+            line = bytes(self._buffer[:newline])
+            del self._buffer[: newline + 1]
+            if self._discarding_oversized_line:
+                self._discarding_oversized_line = False
+                continue
+            if line.endswith(b"\r"):
+                line = line[:-1]
+            if len(line) > self._max_line_bytes:
+                events.append(
+                    self._error(
+                        "stream_message_too_large",
+                        "Provider stream message exceeded the configured size limit.",
+                    )
+                )
+            elif line.strip():
+                events.append(self._parse_line(line))
+        return tuple(events)
+
+    def finish(self) -> tuple[RuntimeEvent, ...]:
+        """Flush one final unterminated line and close the normalizer."""
+        if self._finished:
+            return ()
+        self._finished = True
+        if self._discarding_oversized_line:
+            self._buffer.clear()
+            return ()
+        line = bytes(self._buffer)
+        self._buffer.clear()
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        if not line.strip():
+            return ()
+        return (self._parse_line(line),)
+
+
 class FakeProvider:
     """Deterministic in memory demo adapter; never executes tools or writes files."""
 

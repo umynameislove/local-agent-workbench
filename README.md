@@ -81,6 +81,10 @@ Declarations are immutable snapshots supplied by adapters. This contract does no
 
 The schema validates individual events. Stream ordering, duplicate handling and persistence remain separate responsibilities; runtime events do not replace the SQLite event ledger.
 
+`RuntimeEventStreamNormalizer` consumes UTF-8 JSON Lines incrementally and assigns trusted job identity, runtime, sequence and observation time. Provider messages contain only `kind` and `payload`. Chunk boundaries, multibyte text, blank lines and a final line without a newline are handled without losing order. Invalid encoding, JSON, duplicate fields, oversized messages and invalid event payloads produce sanitized error events without exposing raw provider output or preventing later valid messages from being processed.
+
+The normalizer does not persist events, change durable job state, authorize provider activity or interpret a provider native protocol. Each native adapter remains responsible for translating its own output into the small JSON Lines fragment contract before normalization.
+
 `FakeProvider` supplies a deterministic demo through the adapter protocol. Its `events(session)` method returns an immutable snapshot containing a simulated plan, write proposal, verification message and review question. Sending `approve` or `reject` finishes the demo; cancellation is repeatable. Events use a fixed synthetic timestamp and clearly label simulated outcomes. The adapter does not execute tools, modify files, grant approvals or resume sessions after restart.
 
 ## Process execution
