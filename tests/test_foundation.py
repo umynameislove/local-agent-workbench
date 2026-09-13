@@ -31,6 +31,7 @@ from engine import (
     resolve_runtime_home,
     validate_consultant_advice,
 )
+from event_stream import EventStreamService
 
 
 def test_runtime_home_resolves_relative_path_and_bootstraps_outside_source(tmp_path: Path) -> None:
@@ -102,6 +103,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.project_repository, ProjectRepository)
         assert isinstance(api.state.job_repository, JobRepository)
         assert isinstance(api.state.event_repository, EventRepository)
+        assert isinstance(api.state.event_stream_service, EventStreamService)
         assert isinstance(api.state.approval_repository, ApprovalRepository)
         assert isinstance(api.state.planner_repository, PlannerRepository)
         assert isinstance(api.state.usage_repository, UsageRepository)

@@ -5,8 +5,10 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from db import (
     ApprovalRepository,
@@ -15,7 +17,11 @@ from db import (
     BackupServiceError,
     Database,
     EventRepository,
+    EventRepositoryError,
+    JobNotFoundError,
     JobRepository,
+    JobRepositoryError,
+    JobValidationError,
     MemoryReferenceRepository,
     PlannerRepository,
     ProjectRepository,
@@ -23,6 +29,7 @@ from db import (
     UsageRepository,
 )
 from engine import APP_VERSION, RUNTIME_ENV, JobRuntime, RuntimeHome, resolve_runtime_home
+from event_stream import EventStreamCursorError, EventStreamService
 from logging_setup import configure_logging
 
 
@@ -48,6 +55,10 @@ def create_app(
         app.state.project_repository = ProjectRepository(database)
         app.state.job_repository = JobRepository(database)
         app.state.event_repository = EventRepository(database)
+        app.state.event_stream_service = EventStreamService(
+            app.state.job_repository,
+            app.state.event_repository,
+        )
         app.state.approval_repository = ApprovalRepository(database)
         app.state.planner_repository = PlannerRepository(database)
         app.state.usage_repository = UsageRepository(database)
@@ -102,6 +113,30 @@ def create_app(
                 "can_approve": False,
             },
         }
+
+    @api.get("/api/jobs/{job_id}/events")
+    async def job_events(
+        request: Request,
+        job_id: str,
+        last_event_id: Annotated[str | None, Header(alias="Last-Event-ID")] = None,
+    ) -> StreamingResponse:
+        service: EventStreamService = request.app.state.event_stream_service
+        try:
+            body = service.subscribe(job_id, last_event_id)
+        except (JobNotFoundError, JobValidationError) as error:
+            raise HTTPException(status_code=404, detail="Job does not exist.") from error
+        except EventStreamCursorError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except (EventRepositoryError, JobRepositoryError) as error:
+            raise HTTPException(status_code=503, detail="Event stream is unavailable.") from error
+        return StreamingResponse(
+            body,
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     return api
 
