@@ -1818,6 +1818,32 @@ class EventRepository(_Repository):
             ).fetchall()
         return tuple(self._to_record(row) for row in rows)
 
+    def list_after(
+        self,
+        job_id: str,
+        sequence: int,
+        *,
+        limit: int = 128,
+    ) -> tuple[EventRecord, ...]:
+        normalized_job_id = self._validate_text(job_id, field="job_id")
+        if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+            raise EventValidationError("Event sequence cursor is invalid.")
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 1_000:
+            raise EventValidationError("Event query limit is invalid.")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, job_id, sequence, event_type, payload,
+                       payload_hash, idempotency_key, created_at
+                FROM events
+                WHERE job_id = ? AND sequence > ?
+                ORDER BY sequence
+                LIMIT ?
+                """,
+                (normalized_job_id, sequence, limit),
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
     @staticmethod
     def _select_by_id(connection: sqlite3.Connection, event_id: int) -> sqlite3.Row | None:
         return connection.execute(
