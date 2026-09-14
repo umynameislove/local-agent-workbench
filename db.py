@@ -1334,6 +1334,24 @@ class ProjectRepository(_Repository):
                 raise ProjectRepositoryError("Project could not be created.") from error
         return stored
 
+    def register(self, project: ProjectConfig) -> ProjectRecord:
+        """Create a configured project once and reject conflicting restarts."""
+
+        try:
+            return self.create(project)
+        except ProjectAlreadyExistsError:
+            try:
+                stored = self.get(project.id)
+            except ProjectNotFoundError:
+                raise ProjectAlreadyExistsError(
+                    "Configured project root is already registered to another project."
+                ) from None
+            if stored.to_config() != project:
+                raise ProjectAlreadyExistsError(
+                    "Configured project conflicts with persisted project state."
+                ) from None
+            return stored
+
     def get(self, project_id: str) -> ProjectRecord:
         normalized_id = self._validate_project_id(project_id)
         with self._connection() as connection:
