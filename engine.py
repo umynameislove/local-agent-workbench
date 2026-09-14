@@ -8,7 +8,7 @@ import signal
 import sys
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -18,6 +18,7 @@ from typing import Any, Protocol
 
 APP_VERSION = "0.1.0"
 RUNTIME_ENV = "AGENT_WORKBENCH_HOME"
+CONFIG_FILENAME = "config.json"
 CONSULTANT_MODEL = "deepseek/deepseek-v4-flash-0731"
 CONSULTANT_RECOMMENDATIONS = frozenset({"codex", "claude", "local", "ask_user"})
 
@@ -867,6 +868,10 @@ class RuntimeHome:
     root: Path
 
     @property
+    def config(self) -> Path:
+        return self.root / CONFIG_FILENAME
+
+    @property
     def state_db(self) -> Path:
         return self.root / "state.db"
 
@@ -925,11 +930,22 @@ class ProjectConfig:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ProjectConfig:
-        project_id = str(value.get("id", "")).strip()
-        root = str(value.get("root", "")).strip()
-        if not project_id or not root:
+        if not isinstance(value, Mapping):
+            raise ConfigurationError("Each project must be an object.")
+        project_id = value.get("id")
+        root = value.get("root")
+        if any(
+            not isinstance(item, str) or not item or item != item.strip() or "\x00" in item
+            for item in (project_id, root)
+        ):
             raise ConfigurationError("Each project requires an id and a root value.")
-        sensitivity = Sensitivity(value.get("sensitivity", Sensitivity.PRIVATE))
+        try:
+            sensitivity = Sensitivity(value.get("sensitivity", Sensitivity.PRIVATE))
+            permission_mode = PermissionMode(
+                value.get("permission_mode", PermissionMode.SANDBOXED_WRITE)
+            )
+        except ValueError:
+            raise ConfigurationError("Project sensitivity or permission mode is invalid.") from None
         cloud_allowed = value.get("cloud_allowed", False)
         if not isinstance(cloud_allowed, bool):
             raise ConfigurationError("Project cloud_allowed must be a boolean.")
@@ -940,9 +956,7 @@ class ProjectConfig:
             root=root,
             sensitivity=sensitivity,
             cloud_allowed=cloud_allowed,
-            permission_mode=PermissionMode(
-                value.get("permission_mode", PermissionMode.SANDBOXED_WRITE)
-            ),
+            permission_mode=permission_mode,
         )
 
 
@@ -1037,17 +1051,22 @@ class ConsultantConfig:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> ConsultantConfig:
+        if not isinstance(value, Mapping):
+            raise ConfigurationError("consultant must be an object.")
         enabled = value.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ConfigurationError("Consultant enabled must be a boolean.")
-        config = cls(
-            enabled=enabled,
-            model=str(value.get("model", CONSULTANT_MODEL)),
-            min_confidence=float(value.get("min_confidence", 0.8)),
-            monthly_hard_cap_usd=float(value.get("monthly_hard_cap_usd", 5.0)),
-            warning_usd=float(value.get("warning_usd", 4.0)),
-            per_job_cap_usd=float(value.get("per_job_cap_usd", 0.1)),
-        )
+        try:
+            config = cls(
+                enabled=enabled,
+                model=str(value.get("model", CONSULTANT_MODEL)),
+                min_confidence=float(value.get("min_confidence", 0.8)),
+                monthly_hard_cap_usd=float(value.get("monthly_hard_cap_usd", 5.0)),
+                warning_usd=float(value.get("warning_usd", 4.0)),
+                per_job_cap_usd=float(value.get("per_job_cap_usd", 0.1)),
+            )
+        except (TypeError, ValueError):
+            raise ConfigurationError("Consultant limits must be numeric.") from None
         if config.model != CONSULTANT_MODEL:
             raise ConfigurationError(f"V1 consultant model must be {CONSULTANT_MODEL}.")
         if not 0.0 <= config.min_confidence <= 1.0:
@@ -1068,11 +1087,16 @@ class WorkbenchConfig:
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WorkbenchConfig:
+        if not isinstance(value, Mapping):
+            raise ConfigurationError("Config root must be an object.")
         if not isinstance(value.get("version"), int) or isinstance(value.get("version"), bool):
             raise ConfigurationError("Config version must be an integer.")
         if value.get("version") != 1:
             raise ConfigurationError("Unsupported config version.")
-        projects = tuple(ProjectConfig.from_dict(item) for item in value.get("projects", []))
+        project_values = value.get("projects", [])
+        if not isinstance(project_values, list):
+            raise ConfigurationError("projects must be an array.")
+        projects = tuple(ProjectConfig.from_dict(item) for item in project_values)
         if not projects:
             raise ConfigurationError("At least one project is required.")
         if len({project.id for project in projects}) != len(projects):
@@ -1094,11 +1118,73 @@ class WorkbenchConfig:
 
     @classmethod
     def load(cls, path: Path) -> WorkbenchConfig:
-        with path.open(encoding="utf-8") as handle:
-            value = json.load(handle)
+        try:
+            with path.open(encoding="utf-8") as handle:
+                value = json.load(handle)
+        except FileNotFoundError:
+            raise ConfigurationError("Configuration file does not exist.") from None
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            raise ConfigurationError(
+                "Configuration file could not be read as valid JSON."
+            ) from None
         if not isinstance(value, Mapping):
             raise ConfigurationError("Config root must be an object.")
         return cls.from_dict(value)
+
+
+async def load_configured_projects(path: Path) -> tuple[ProjectConfig, ...]:
+    """Load configured projects and require each path to be an exact Git root."""
+
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return ()
+    except OSError:
+        raise ConfigurationError("Configuration file could not be inspected.") from None
+    config = WorkbenchConfig.load(path)
+    try:
+        base = path.parent.resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise ConfigurationError("Configuration directory could not be resolved.") from None
+    projects: list[ProjectConfig] = []
+    for project in config.projects:
+        try:
+            candidate = Path(project.root).expanduser()
+            if not candidate.is_absolute():
+                candidate = base / candidate
+            root = candidate.resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            raise ConfigurationError("Configured project root does not exist.") from None
+        if not root.is_dir():
+            raise ConfigurationError("Configured project root must be a directory.")
+        try:
+            result = await run_process(
+                ("git", "rev-parse", "--show-toplevel"),
+                cwd=root,
+                timeout=10,
+            )
+        except ProcessRunnerError:
+            raise ConfigurationError(
+                "Git could not be started while validating the configured project root."
+            ) from None
+        if result.returncode != 0:
+            raise ConfigurationError(
+                "Configured project root must be the top level of a Git worktree."
+            )
+        try:
+            reported = result.stdout.decode("utf-8").rstrip("\r\n")
+            git_root = Path(reported).resolve(strict=True)
+            same_root = bool(reported) and root.samefile(git_root)
+        except (OSError, RuntimeError, UnicodeError, ValueError):
+            raise ConfigurationError("Git returned an invalid project root.") from None
+        if not same_root:
+            raise ConfigurationError(
+                "Configured project root points inside a Git worktree. Use its top level directory."
+            )
+        projects.append(replace(project, root=str(git_root)))
+    if len({project.root for project in projects}) != len(projects):
+        raise ConfigurationError("Project roots must be unique.")
+    return tuple(projects)
 
 
 def validate_consultant_advice(

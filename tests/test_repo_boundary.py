@@ -125,6 +125,14 @@ def test_runtime_database_and_log_files_are_rejected(tmp_path: Path) -> None:
     assert "runtime-log" in triggered
 
 
+@pytest.mark.parametrize("name", ["config.json", "config.yaml"])
+def test_runtime_configuration_is_rejected(tmp_path: Path, name: str) -> None:
+    build_clean_repository(tmp_path)
+    (tmp_path / name).write_text('{"projects": []}\n', encoding="utf-8")
+
+    assert "runtime-configuration" in rules_triggered(tmp_path)
+
+
 def test_private_key_marker_is_rejected_without_leaking_the_material(tmp_path: Path) -> None:
     build_clean_repository(tmp_path)
     (tmp_path / "deploy_notes.md").write_text(SYNTHETIC_PRIVATE_KEY, encoding="utf-8")

@@ -28,7 +28,14 @@ from db import (
     RecoveryService,
     UsageRepository,
 )
-from engine import APP_VERSION, RUNTIME_ENV, JobRuntime, RuntimeHome, resolve_runtime_home
+from engine import (
+    APP_VERSION,
+    RUNTIME_ENV,
+    JobRuntime,
+    RuntimeHome,
+    load_configured_projects,
+    resolve_runtime_home,
+)
 from event_stream import EventStreamCursorError, EventStreamService
 from logging_setup import configure_logging
 
@@ -48,11 +55,15 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.bootstrap()
+        configured_projects = await load_configured_projects(runtime.config)
         database = Database(runtime.state_db)
         schema_version = database.initialize()
         app.state.runtime = runtime
         app.state.database = database
         app.state.project_repository = ProjectRepository(database)
+        app.state.projects = tuple(
+            app.state.project_repository.register(project) for project in configured_projects
+        )
         app.state.job_repository = JobRepository(database)
         app.state.event_repository = EventRepository(database)
         app.state.event_stream_service = EventStreamService(
@@ -102,11 +113,20 @@ def create_app(
         }
 
     @api.get("/api/bootstrap")
-    async def bootstrap() -> dict[str, object]:
+    async def bootstrap(request: Request) -> dict[str, object]:
         return {
             "version": APP_VERSION,
             "windows": ["workspace", "planner"],
             "runtimes": [runtime.value for runtime in JobRuntime],
+            "projects": [
+                {
+                    "id": project.id,
+                    "sensitivity": project.sensitivity.value,
+                    "cloud_allowed": project.cloud_allowed,
+                    "permission_mode": project.permission_mode.value,
+                }
+                for project in request.app.state.projects
+            ],
             "consultant": {
                 "role": "advice-only",
                 "can_execute": False,

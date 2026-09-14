@@ -57,6 +57,7 @@ FORBIDDEN_FILE_NAMES: dict[str, str] = {
     "rules.md": "internal-operating-rules",
     "plan.md": "internal-plan",
     "tracking.md": "internal-tracking",
+    "config.json": "runtime-configuration",
     "config.yaml": "runtime-configuration",
     ".env": "local-credential-file",
     ".ds_store": "local-artifact",

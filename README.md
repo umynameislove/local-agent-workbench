@@ -46,6 +46,18 @@ working-local/  real config, database, logs, cache and worktrees; never push
 
 The application will use `AGENT_WORKBENCH_HOME` to locate its runtime home. Personal configuration and operational state are never part of this repository.
 
+## Project configuration
+
+Copy the public example into the runtime home, then set each project root to an existing Git worktree:
+
+```bash
+cp config.example.json ../working-local/config.json
+```
+
+Relative project roots are resolved from the directory containing `config.json`. Each root must identify the top level directory of a Git worktree. Missing paths, regular files, non Git directories and nested worktree paths stop startup with a safe configuration error.
+
+The application can start without `config.json` and reports an empty project list. When configuration is present, matching projects are registered once in SQLite. A later configuration that conflicts with persisted project identity or policy fails closed instead of rewriting durable state.
+
 ## Status
 
 Foundation implementation is in progress. The first usable vertical slice remains one project, one native provider, one worktree, one diff and one approval. Internal planning, mockups, benchmarks and progress tracking are intentionally maintained outside this public repository.
