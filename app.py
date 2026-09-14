@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import argparse
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from db import (
@@ -37,6 +37,13 @@ from engine import (
     resolve_runtime_home,
 )
 from event_stream import EventStreamCursorError, EventStreamService
+from job_submission import (
+    JobSubmissionConflictError,
+    JobSubmissionNotFoundError,
+    JobSubmissionService,
+    JobSubmissionUnavailableError,
+    JobSubmissionValidationError,
+)
 from logging_setup import configure_logging
 
 
@@ -45,6 +52,7 @@ def create_app(
     *,
     cwd: Path | None = None,
     user_home: Path | None = None,
+    job_id_factory: Callable[[], str] | None = None,
 ) -> FastAPI:
     runtime: RuntimeHome = resolve_runtime_home(env, cwd=cwd, user_home=user_home)
     runtime_home_configured = bool(
@@ -65,6 +73,12 @@ def create_app(
             app.state.project_repository.register(project) for project in configured_projects
         )
         app.state.job_repository = JobRepository(database)
+        app.state.job_submission_service = JobSubmissionService(
+            app.state.project_repository,
+            app.state.job_repository,
+            active_project_ids=frozenset(project.id for project in app.state.projects),
+            id_factory=job_id_factory,
+        )
         app.state.event_repository = EventRepository(database)
         app.state.event_stream_service = EventStreamService(
             app.state.job_repository,
@@ -157,6 +171,32 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @api.post("/api/jobs", status_code=201)
+    async def create_job(
+        request: Request,
+        payload: Annotated[object, Body()],
+    ) -> dict[str, object]:
+        service: JobSubmissionService = request.app.state.job_submission_service
+        try:
+            job = await service.submit(payload)
+        except JobSubmissionValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except JobSubmissionNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except JobSubmissionConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except JobSubmissionUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+        return {
+            "created_at": job.created_at,
+            "id": job.id,
+            "model": job.model,
+            "project_id": job.project_id,
+            "request": job.request,
+            "runtime": job.runtime.value,
+            "state": job.state.value,
+        }
 
     return api
 

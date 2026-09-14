@@ -58,11 +58,13 @@ Relative project roots are resolved from the directory containing `config.json`.
 
 The application can start without `config.json` and reports an empty project list. When configuration is present, matching projects are registered once in SQLite. A later configuration that conflicts with persisted project identity or policy fails closed instead of rewriting durable state.
 
+Submit a task with `POST /api/jobs`. The client provides only `project_id`, `request` and optional `runtime` and `model` values. The server creates the job identity, verifies the repository `HEAD` and stores an immutable snapshot of the project policy and selected runtime. The response omits the project root and internal snapshot.
+
 ## Status
 
 Foundation implementation is in progress. The first usable vertical slice remains one project, one native provider, one worktree, one diff and one approval. Internal planning, mockups, benchmarks and progress tracking are intentionally maintained outside this public repository.
 
-Current foundation includes the runtime home boundary, initial local directories, versioned public config, strict consultant response validation and `/api/health` plus `/api/bootstrap`. The durable state layer now includes embedded sequential SQLite migrations plus project, job, append only event, approval, planner, observed usage and immutable `projmem` reference persistence with explicit identity, policy, runtime, request snapshot, payload integrity, scoped idempotency, expiry, an enforced job lifecycle, atomic job state and event recording, atomic planner promotion, truthful nullable quota state and restart recovery classification. SQLite stores only memory identifiers and operational provenance; semantic memory content remains owned by `projmem`.
+Current foundation includes the runtime home boundary, initial local directories, versioned public config, strict consultant response validation, `/api/health`, `/api/bootstrap` and durable job submission through `POST /api/jobs`. The durable state layer now includes embedded sequential SQLite migrations plus project, job, append only event, approval, planner, observed usage and immutable `projmem` reference persistence with explicit identity, policy, runtime, request snapshot, payload integrity, scoped idempotency, expiry, an enforced job lifecycle, atomic job state and event recording, atomic planner promotion, truthful nullable quota state and restart recovery classification. SQLite stores only memory identifiers and operational provenance; semantic memory content remains owned by `projmem`.
 
 ## Development quick start
 
