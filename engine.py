@@ -19,6 +19,7 @@ from typing import Any, Protocol
 APP_VERSION = "0.1.0"
 RUNTIME_ENV = "AGENT_WORKBENCH_HOME"
 CONFIG_FILENAME = "config.json"
+CONFIG_VERSION = 1
 CONSULTANT_MODEL = "deepseek/deepseek-v4-flash-0731"
 CONSULTANT_RECOMMENDATIONS = frozenset({"codex", "claude", "local", "ask_user"})
 
@@ -1091,7 +1092,7 @@ class WorkbenchConfig:
             raise ConfigurationError("Config root must be an object.")
         if not isinstance(value.get("version"), int) or isinstance(value.get("version"), bool):
             raise ConfigurationError("Config version must be an integer.")
-        if value.get("version") != 1:
+        if value.get("version") != CONFIG_VERSION:
             raise ConfigurationError("Unsupported config version.")
         project_values = value.get("projects", [])
         if not isinstance(project_values, list):
@@ -1110,7 +1111,7 @@ class WorkbenchConfig:
                 raise ConfigurationError("Provider flags must be booleans.")
             normalized_providers[str(key)] = enabled
         return cls(
-            version=1,
+            version=CONFIG_VERSION,
             projects=projects,
             providers=normalized_providers,
             consultant=ConsultantConfig.from_dict(value.get("consultant", {})),
