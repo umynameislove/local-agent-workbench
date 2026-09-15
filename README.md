@@ -60,6 +60,8 @@ The application can start without `config.json` and reports an empty project lis
 
 Submit a task with `POST /api/jobs`. The client provides only `project_id`, `request` and optional `runtime` and `model` values. The server creates the job identity, verifies the repository `HEAD` and stores an immutable snapshot of the project policy and selected runtime. The response omits the project root and internal snapshot.
 
+`POST /api/jobs/{id}/plan` records a deterministic demo planning preview through the durable job and event lifecycle. `GET /api/jobs/{id}/plan` returns the same plan block after a restart, and the event stream can replay it. The preview does not inspect repository files, create a worktree or authorize execution. Native provider planning remains a separate integration step.
+
 ## Status
 
 Foundation implementation is in progress. The first usable vertical slice remains one project, one native provider, one worktree, one diff and one approval. Internal planning, mockups, benchmarks and progress tracking are intentionally maintained outside this public repository.
