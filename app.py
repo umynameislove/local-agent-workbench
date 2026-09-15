@@ -45,6 +45,12 @@ from job_submission import (
     JobSubmissionValidationError,
 )
 from logging_setup import configure_logging
+from planning import (
+    PlanningConflictError,
+    PlanningNotFoundError,
+    PlanningUnavailableError,
+    ReadOnlyPlanningService,
+)
 
 
 def create_app(
@@ -89,6 +95,11 @@ def create_app(
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
         app.state.atomic_transition_service = AtomicTransitionService(database)
+        app.state.planning_service = ReadOnlyPlanningService(
+            app.state.job_repository,
+            app.state.event_repository,
+            app.state.atomic_transition_service,
+        )
         app.state.recovery_service = RecoveryService(database, runtime.worktrees)
         app.state.recovery_items = app.state.recovery_service.load()
         app.state.schema_version = schema_version
@@ -197,6 +208,30 @@ def create_app(
             "runtime": job.runtime.value,
             "state": job.state.value,
         }
+
+    @api.post("/api/jobs/{job_id}/plan")
+    async def run_plan(request: Request, job_id: str) -> dict[str, object]:
+        service: ReadOnlyPlanningService = request.app.state.planning_service
+        try:
+            return service.run(job_id).to_dict()
+        except PlanningNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except PlanningConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except PlanningUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.get("/api/jobs/{job_id}/plan")
+    async def read_plan(request: Request, job_id: str) -> dict[str, object]:
+        service: ReadOnlyPlanningService = request.app.state.planning_service
+        try:
+            return service.read(job_id).to_dict()
+        except PlanningNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except PlanningConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except PlanningUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
 
     return api
 
