@@ -2055,6 +2055,74 @@ class AtomicTransitionService(_Repository):
                     "Atomic transition encountered invalid stored data."
                 ) from error
 
+    def bind_worktree(
+        self,
+        job: JobUpdate,
+        event: EventCreate,
+    ) -> AtomicTransitionRecord:
+        """Persist one worktree path and its event without changing job state."""
+
+        try:
+            JobRepository._validate_update(job)
+            payload, payload_hash, idempotency_key = EventRepository._validate_event(event)
+        except (JobValidationError, EventValidationError) as error:
+            raise AtomicTransitionValidationError(
+                "Atomic worktree binding request is invalid."
+            ) from error
+        if job.id != event.job_id or job.worktree_path is None:
+            raise AtomicTransitionValidationError(
+                "Atomic worktree binding identifiers or path are invalid."
+            )
+
+        with self._write_connection() as connection:
+            try:
+                existing_event = EventRepository._matching_idempotent_event(
+                    connection,
+                    event,
+                    payload_hash,
+                    idempotency_key,
+                )
+                if existing_event is not None:
+                    return self._resolve_retry(connection, job, existing_event)
+                row = JobRepository._select_by_id(connection, job.id)
+                if row is None:
+                    raise JobNotFoundError("Job does not exist.")
+                current_job = JobRepository._to_record(row)
+                if (
+                    current_job.state != job.state
+                    or current_job.runtime != job.runtime
+                    or current_job.model != job.model
+                    or current_job.worktree_path is not None
+                ):
+                    raise AtomicTransitionConflictError(
+                        "Atomic worktree binding conflicts with committed job state."
+                    )
+                stored_job = JobRepository._update(connection, job)
+                stored_event = EventRepository._append(
+                    connection,
+                    event,
+                    payload,
+                    payload_hash,
+                    idempotency_key,
+                )
+                return AtomicTransitionRecord(job=stored_job, event=stored_event)
+            except JobNotFoundError as error:
+                raise AtomicTransitionValidationError(
+                    "Atomic worktree binding job does not exist."
+                ) from error
+            except EventIdempotencyConflictError as error:
+                raise AtomicTransitionConflictError(
+                    "Atomic worktree binding idempotency key conflicts with committed data."
+                ) from error
+            except sqlite3.IntegrityError as error:
+                raise AtomicTransitionError(
+                    "Atomic worktree binding could not be recorded."
+                ) from error
+            except (JobRepositoryError, EventRepositoryError) as error:
+                raise AtomicTransitionError(
+                    "Atomic worktree binding encountered invalid stored data."
+                ) from error
+
     @classmethod
     def _resolve_retry(
         cls,

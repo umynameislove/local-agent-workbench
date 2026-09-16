@@ -32,6 +32,7 @@ from engine import (
     validate_consultant_advice,
 )
 from event_stream import EventStreamService
+from worktree import WorktreeManager
 
 
 def test_runtime_home_resolves_relative_path_and_bootstraps_outside_source(tmp_path: Path) -> None:
@@ -109,6 +110,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.usage_repository, UsageRepository)
         assert isinstance(api.state.memory_reference_repository, MemoryReferenceRepository)
         assert isinstance(api.state.atomic_transition_service, AtomicTransitionService)
+        assert isinstance(api.state.worktree_manager, WorktreeManager)
         assert isinstance(api.state.recovery_service, RecoveryService)
         assert api.state.recovery_items == ()
         transport = httpx.ASGITransport(app=api)

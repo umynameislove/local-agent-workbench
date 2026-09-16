@@ -51,6 +51,12 @@ from planning import (
     PlanningUnavailableError,
     ReadOnlyPlanningService,
 )
+from worktree import (
+    WorktreeConflictError,
+    WorktreeManager,
+    WorktreeNotFoundError,
+    WorktreeUnavailableError,
+)
 
 
 def create_app(
@@ -99,6 +105,12 @@ def create_app(
             app.state.job_repository,
             app.state.event_repository,
             app.state.atomic_transition_service,
+        )
+        app.state.worktree_manager = WorktreeManager(
+            app.state.job_repository,
+            app.state.event_repository,
+            app.state.atomic_transition_service,
+            runtime.worktrees,
         )
         app.state.recovery_service = RecoveryService(database, runtime.worktrees)
         app.state.recovery_items = app.state.recovery_service.load()
@@ -231,6 +243,18 @@ def create_app(
         except PlanningConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except PlanningUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.post("/api/jobs/{job_id}/worktree")
+    async def create_worktree(request: Request, job_id: str) -> dict[str, object]:
+        service: WorktreeManager = request.app.state.worktree_manager
+        try:
+            return (await service.create(job_id)).to_dict()
+        except WorktreeNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except WorktreeConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except WorktreeUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
     return api
