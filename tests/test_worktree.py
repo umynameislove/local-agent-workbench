@@ -87,6 +87,31 @@ def identity_for(job_id: str) -> tuple[str, str]:
     return f"law/job-{digest}", f"job-{digest}"
 
 
+def add_unbound_worktree(
+    repository: Path,
+    runtime: Path,
+    job_id: str,
+    base_commit: str,
+) -> tuple[str, str, Path]:
+    branch, key = identity_for(job_id)
+    target = runtime / "worktrees" / key
+    git(
+        repository,
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "core.fsmonitor=false",
+        "worktree",
+        "add",
+        "--no-track",
+        "-b",
+        branch,
+        str(target),
+        base_commit,
+    )
+    return branch, key, target
+
+
 async def submit_and_plan(client: httpx.AsyncClient, job_id: str) -> dict[str, object]:
     created = await client.post(
         "/api/jobs",
@@ -211,6 +236,229 @@ async def test_concurrent_retries_return_one_durable_worktree(tmp_path: Path) ->
     assert sum(event.event_type == "job.worktree.created" for event in events) == 1
     assert len(tuple((runtime / "worktrees").iterdir())) == 1
     assert stored.worktree_path is not None
+
+
+@pytest.mark.anyio
+async def test_restart_rebinds_verified_unbound_worktree_without_duplicate(
+    tmp_path: Path,
+) -> None:
+    repository = initialize_repository(tmp_path / "project")
+    snapshot_head = git(repository, "rev-parse", "HEAD")
+    runtime = tmp_path / "runtime"
+    write_config(runtime, repository)
+    first_app = create_app(
+        {"AGENT_WORKBENCH_HOME": str(runtime)},
+        job_id_factory=lambda: "job-recovery",
+    )
+
+    async with first_app.router.lifespan_context(first_app):
+        transport = httpx.ASGITransport(app=first_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await submit_and_plan(client, "job-recovery")
+        branch, key, target = add_unbound_worktree(
+            repository,
+            runtime,
+            "job-recovery",
+            snapshot_head,
+        )
+        assert first_app.state.job_repository.get("job-recovery").worktree_path is None
+        assert len(first_app.state.event_repository.list("job-recovery")) == 3
+
+    main_head = git(repository, "rev-parse", "HEAD")
+    main_status = git(repository, "status", "--porcelain=v1", "--untracked-files=all")
+    restarted_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
+    async with restarted_app.router.lifespan_context(restarted_app):
+        transport = httpx.ASGITransport(app=restarted_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            responses = await asyncio.gather(
+                *(client.post("/api/jobs/job-recovery/worktree") for _ in range(8))
+            )
+        rebound = restarted_app.state.job_repository.get("job-recovery")
+        rebound_events = restarted_app.state.event_repository.list("job-recovery")
+
+    final_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
+    async with final_app.router.lifespan_context(final_app):
+        transport = httpx.ASGITransport(app=final_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            final_retry = await client.post("/api/jobs/job-recovery/worktree")
+        final_events = final_app.state.event_repository.list("job-recovery")
+
+    assert all(response.status_code == 200 for response in responses)
+    assert all(response.json() == responses[0].json() for response in responses)
+    assert final_retry.status_code == 200
+    assert final_retry.json() == responses[0].json()
+    assert rebound.worktree_path == str(target.resolve())
+    assert sum(event.event_type == "job.worktree.created" for event in rebound_events) == 1
+    assert final_events == rebound_events
+    assert tuple((runtime / "worktrees").iterdir()) == (target,)
+    worktree_entries = [
+        line
+        for line in git(repository, "worktree", "list", "--porcelain").splitlines()
+        if line.startswith("worktree ")
+    ]
+    assert worktree_entries.count(f"worktree {target.resolve()}") == 1
+    assert (
+        git_result(
+            repository,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{branch}",
+        ).returncode
+        == 0
+    )
+    assert git(repository, "rev-parse", "HEAD") == main_head
+    assert git(repository, "status", "--porcelain=v1", "--untracked-files=all") == main_status
+    assert str(repository) not in final_retry.text
+    assert str(runtime) not in final_retry.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mutation", ["dirty", "advanced", "ignored"])
+async def test_restart_rejects_changed_unbound_worktree(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    repository = initialize_repository(tmp_path / "project")
+    if mutation == "ignored":
+        (repository / ".gitignore").write_text(".local-cache\n", encoding="utf-8")
+        git(repository, "add", ".gitignore")
+        git(
+            repository,
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "Add ignored fixture path",
+        )
+    snapshot_head = git(repository, "rev-parse", "HEAD")
+    runtime = tmp_path / "runtime"
+    write_config(runtime, repository)
+    first_app = create_app(
+        {"AGENT_WORKBENCH_HOME": str(runtime)},
+        job_id_factory=lambda: "job-changed",
+    )
+
+    async with first_app.router.lifespan_context(first_app):
+        transport = httpx.ASGITransport(app=first_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await submit_and_plan(client, "job-changed")
+        branch, _, target = add_unbound_worktree(
+            repository,
+            runtime,
+            "job-changed",
+            snapshot_head,
+        )
+        if mutation == "ignored":
+            (target / ".local-cache").write_text(
+                "changed after interruption\n",
+                encoding="utf-8",
+            )
+        else:
+            (target / "example.txt").write_text(
+                "changed after interruption\n",
+                encoding="utf-8",
+            )
+        if mutation == "advanced":
+            git(target, "add", "example.txt")
+            git(
+                target,
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "Unexpected fixture change",
+            )
+
+    restarted_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
+    async with restarted_app.router.lifespan_context(restarted_app):
+        transport = httpx.ASGITransport(app=restarted_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/jobs/job-changed/worktree")
+        stored = restarted_app.state.job_repository.get("job-changed")
+        events = restarted_app.state.event_repository.list("job-changed")
+
+    assert response.status_code == 409
+    assert stored.worktree_path is None
+    assert len(events) == 3
+    assert target.is_dir()
+    assert (
+        git_result(
+            repository,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{branch}",
+        ).returncode
+        == 0
+    )
+    assert str(repository) not in response.text
+    assert str(runtime) not in response.text
+
+
+@pytest.mark.anyio
+async def test_rebind_failure_preserves_preexisting_worktree_for_inspection(
+    tmp_path: Path,
+) -> None:
+    repository = initialize_repository(tmp_path / "project")
+    snapshot_head = git(repository, "rev-parse", "HEAD")
+    runtime = tmp_path / "runtime"
+    write_config(runtime, repository)
+    first_app = create_app(
+        {"AGENT_WORKBENCH_HOME": str(runtime)},
+        job_id_factory=lambda: "job-rebind-failure",
+    )
+
+    async with first_app.router.lifespan_context(first_app):
+        transport = httpx.ASGITransport(app=first_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            await submit_and_plan(client, "job-rebind-failure")
+        branch, _, target = add_unbound_worktree(
+            repository,
+            runtime,
+            "job-rebind-failure",
+            snapshot_head,
+        )
+
+    restarted_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
+    async with restarted_app.router.lifespan_context(restarted_app):
+        with sqlite3.connect(restarted_app.state.database.path) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_recovered_worktree_binding
+                BEFORE UPDATE ON jobs
+                WHEN NEW.worktree_path IS NOT NULL
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic recovered binding failure');
+                END
+                """
+            )
+        transport = httpx.ASGITransport(app=restarted_app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/api/jobs/job-rebind-failure/worktree")
+        stored = restarted_app.state.job_repository.get("job-rebind-failure")
+        events = restarted_app.state.event_repository.list("job-rebind-failure")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Worktree binding could not be recorded."}
+    assert stored.worktree_path is None
+    assert len(events) == 3
+    assert target.is_dir()
+    assert git(target, "rev-parse", "HEAD") == snapshot_head
+    assert (
+        git_result(
+            repository,
+            "show-ref",
+            "--verify",
+            f"refs/heads/{branch}",
+        ).returncode
+        == 0
+    )
+    assert "synthetic" not in response.text
 
 
 @pytest.mark.anyio

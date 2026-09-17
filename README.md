@@ -62,7 +62,7 @@ Submit a task with `POST /api/jobs`. The client provides only `project_id`, `req
 
 `POST /api/jobs/{id}/plan` records a deterministic demo planning preview through the durable job and event lifecycle. `GET /api/jobs/{id}/plan` returns the same plan block after a restart, and the event stream can replay it. The preview does not inspect repository files, create a worktree or authorize execution. Native provider planning remains a separate integration step.
 
-`POST /api/jobs/{id}/worktree` creates one isolated Git worktree from the immutable repository snapshot after planning. The service uses a deterministic branch and runtime key, records the binding with its durable event, and leaves the configured project working tree unchanged. Local filesystem paths remain private. Existing artifact recovery after an interrupted creation is handled separately.
+`POST /api/jobs/{id}/worktree` creates one isolated Git worktree from the immutable repository snapshot after planning. The service uses a deterministic branch and runtime key, records the binding with its durable event, and leaves the configured project working tree unchanged. Local filesystem paths remain private. Retrying after a restart rebinds a complete, verified and unchanged worktree left by an interrupted database binding. Partial, modified or mismatched artifacts fail closed for manual inspection.
 
 ## Status
 

@@ -144,7 +144,8 @@ class WorktreeManager:
             raise WorktreeConflictError("Job must finish planning before worktree creation.")
 
         await self._verify_repository(project, contract.base_commit)
-        await self._require_available_target(project, target, contract.branch)
+        if await self._artifact_exists(project, target, contract.branch):
+            return await self._recover_existing(job, contract, project, target)
         head_before, status_before = await self._repository_state(project)
         created = await self._git(
             (
@@ -263,28 +264,57 @@ class WorktreeManager:
         if commit.returncode != 0 or self._decode_commit(commit.stdout) != base_commit:
             raise WorktreeConflictError("Job base commit is unavailable.")
 
-    async def _require_available_target(
+    async def _artifact_exists(
         self,
         project: Path,
         target: Path,
         branch: str,
-    ) -> None:
+    ) -> bool:
         try:
             target.lstat()
         except FileNotFoundError:
-            pass
+            target_exists = False
         except OSError as error:
             raise WorktreeUnavailableError("Worktree target cannot be inspected.") from error
         else:
-            raise WorktreeConflictError("Worktree target already exists.")
+            target_exists = True
         branch_result = await self._git(
             ("show-ref", "--verify", "--quiet", f"refs/heads/{branch}"),
             cwd=project,
         )
-        if branch_result.returncode == 0:
-            raise WorktreeConflictError("Worktree branch already exists.")
-        if branch_result.returncode != 1:
+        if branch_result.returncode not in {0, 1}:
             raise WorktreeUnavailableError("Worktree branch cannot be inspected.")
+        branch_exists = branch_result.returncode == 0
+        if target_exists != branch_exists:
+            raise WorktreeConflictError("Worktree state requires attention.")
+        return target_exists
+
+    async def _recover_existing(
+        self,
+        job: JobRecord,
+        contract: _WorktreeContract,
+        project: Path,
+        target: Path,
+    ) -> WorktreeBlock:
+        resolved = await self._verify_worktree(project, target, contract)
+        status = await self._git(
+            (
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+                "--ignored=matching",
+            ),
+            cwd=resolved,
+        )
+        if status.returncode != 0:
+            raise WorktreeUnavailableError("Existing worktree cannot be inspected.")
+        if status.stdout:
+            raise WorktreeConflictError("Existing worktree contains uncommitted changes.")
+        return self._bind(job, contract, resolved)
 
     async def _repository_state(self, project: Path) -> tuple[str, bytes]:
         head = await self._git(("rev-parse", "--verify", "HEAD^{commit}"), cwd=project)
@@ -312,7 +342,7 @@ class WorktreeManager:
     ) -> Path:
         resolved = self._resolve_directory(
             target,
-            conflict="Created worktree is invalid.",
+            conflict="Worktree artifact is invalid.",
         )
         top = await self._git(("rev-parse", "--show-toplevel"), cwd=resolved)
         head = await self._git(("rev-parse", "--verify", "HEAD^{commit}"), cwd=resolved)
@@ -334,7 +364,7 @@ class WorktreeManager:
         except (OSError, RuntimeError, UnicodeError, ValueError):
             valid = False
         if not valid:
-            raise WorktreeConflictError("Created worktree failed verification.")
+            raise WorktreeConflictError("Worktree artifact failed verification.")
         return resolved
 
     async def _common_git_directory(self, cwd: Path) -> Path:
