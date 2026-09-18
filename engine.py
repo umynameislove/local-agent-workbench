@@ -6,7 +6,7 @@ import math
 import os
 import signal
 import sys
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -43,6 +43,7 @@ async def run_process(
     argv: tuple[str, ...],
     *,
     cwd: Path,
+    env: Mapping[str, str] | None = None,
     timeout: float = 60.0,
 ) -> ProcessResult:
     """Run structured arguments on POSIX and reap the process group on cancellation.
@@ -61,6 +62,19 @@ async def run_process(
         raise ValueError("Process arguments must be a nonempty tuple of strings.")
     if not isinstance(cwd, Path) or not cwd.is_absolute() or not cwd.is_dir():
         raise ValueError("Process working directory must be an existing absolute Path.")
+    if env is not None and (
+        not isinstance(env, Mapping)
+        or any(
+            not isinstance(key, str)
+            or not key
+            or "=" in key
+            or "\x00" in key
+            or not isinstance(value, str)
+            or "\x00" in value
+            for key, value in env.items()
+        )
+    ):
+        raise ValueError("Process environment must contain valid string entries.")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("Process timeout must be finite and positive.")
 
@@ -81,6 +95,7 @@ async def run_process(
         asyncio.create_subprocess_exec(
             *argv,
             cwd=cwd,
+            env=None if env is None else dict(env),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
@@ -568,6 +583,14 @@ class RuntimeEvent:
             )
         except (TypeError, ValueError, OverflowError) as error:
             raise ValueError("Runtime event is invalid.") from error
+
+
+class StreamingProviderAdapter(ProviderAdapter, Protocol):
+    """Extend provider control operations with one live normalized turn stream."""
+
+    def stream(self, session: AdapterSession) -> AsyncIterator[RuntimeEvent]:
+        """Yield the current turn once while preserving provider backpressure."""
+        ...
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

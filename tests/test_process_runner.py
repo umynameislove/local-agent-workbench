@@ -39,6 +39,35 @@ def test_stdin_is_closed(tmp_path: Path):
     assert result.stdout == b"0\n"
 
 
+def test_explicit_environment_is_used_without_inheriting_secret_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    monkeypatch.setenv("PRIVATE_PARENT_SECRET", "must-not-leak")
+    program = (
+        "import os; "
+        "print(os.environ.get('SAFE_VALUE')); "
+        "print(os.environ.get('PRIVATE_PARENT_SECRET'))"
+    )
+    result = asyncio.run(
+        run_process(
+            (sys.executable, "-c", program),
+            cwd=tmp_path,
+            env={"SAFE_VALUE": "present"},
+        )
+    )
+
+    assert result.stdout == b"present\nNone\n"
+
+
+@pytest.mark.parametrize(
+    "env",
+    [[], {"": "value"}, {"BAD=NAME": "value"}, {"KEY": None}, {"KEY": "bad\x00value"}],
+)
+def test_invalid_process_environment_is_rejected(tmp_path: Path, env):
+    with pytest.raises(ValueError, match="environment"):
+        asyncio.run(run_process((sys.executable,), cwd=tmp_path, env=env))
+
+
 @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf")])
 def test_invalid_timeout_rejected(tmp_path: Path, timeout):
     with pytest.raises(ValueError):

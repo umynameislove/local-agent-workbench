@@ -95,12 +95,15 @@ class ProviderContractTests:
         adapter = subject.factory()
 
         session = await adapter.start(self.request(subject, tmp_path))
-        await adapter.send(session, subject.accepted_message)
+        try:
+            await adapter.send(session, subject.accepted_message)
 
-        assert isinstance(session, AdapterSession)
-        assert session.job_id == "contract-job"
-        assert session.runtime is subject.runtime
-        assert session.session_id
+            assert isinstance(session, AdapterSession)
+            assert session.job_id == "contract-job"
+            assert session.runtime is subject.runtime
+            assert session.session_id
+        finally:
+            await adapter.cancel(session)
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("operation", ["send", "cancel", "resume"])
@@ -114,11 +117,14 @@ class ProviderContractTests:
         session = await adapter.start(self.request(subject, tmp_path))
         foreign = AdapterSession("foreign-job", subject.runtime, session.session_id)
 
-        with pytest.raises(AdapterError):
-            if operation == "send":
-                await adapter.send(foreign, subject.accepted_message)
-            else:
-                await getattr(adapter, operation)(foreign)
+        try:
+            with pytest.raises(AdapterError):
+                if operation == "send":
+                    await adapter.send(foreign, subject.accepted_message)
+                else:
+                    await getattr(adapter, operation)(foreign)
+        finally:
+            await adapter.cancel(session)
 
     @pytest.mark.anyio
     @pytest.mark.parametrize("operation", ["send", "cancel", "resume"])
@@ -137,11 +143,14 @@ class ProviderContractTests:
         )
         foreign = AdapterSession(session.job_id, other_runtime, session.session_id)
 
-        with pytest.raises(AdapterError):
-            if operation == "send":
-                await adapter.send(foreign, subject.accepted_message)
-            else:
-                await getattr(adapter, operation)(foreign)
+        try:
+            with pytest.raises(AdapterError):
+                if operation == "send":
+                    await adapter.send(foreign, subject.accepted_message)
+                else:
+                    await getattr(adapter, operation)(foreign)
+        finally:
+            await adapter.cancel(session)
 
     @pytest.mark.anyio
     async def test_cancel_request_is_repeatable(
@@ -165,8 +174,11 @@ class ProviderContractTests:
         session = await adapter.start(self.request(subject, tmp_path))
 
         try:
-            resumed = await adapter.resume(session)
-        except AdapterUnsupportedError:
-            return
+            try:
+                resumed = await adapter.resume(session)
+            except AdapterUnsupportedError:
+                return
 
-        assert resumed == session
+            assert resumed == session
+        finally:
+            await adapter.cancel(session)
