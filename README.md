@@ -107,7 +107,19 @@ The normalizer does not persist events, change durable job state, authorize prov
 
 `FakeProvider` supplies a deterministic demo through the adapter protocol. Its `events(session)` method returns an immutable snapshot containing a simulated plan, write proposal, verification message and review question. Sending `approve` or `reject` finishes the demo; cancellation is repeatable. Events use a fixed synthetic timestamp and clearly label simulated outcomes. The adapter does not execute tools, modify files, grant approvals or resume sessions after restart.
 
-The reusable provider conformance suite applies the same capability, health, identity, messaging, cancellation and resume assertions to every registered adapter. `FakeProvider` is the current deterministic subject. A native adapter must inherit the same suite and pass its assertions before the provider contract gate can close.
+The reusable provider conformance suite applies the same capability, health, identity, messaging, cancellation and resume assertions to every registered adapter. `FakeProvider` and the Codex native adapter inherit the same suite.
+
+## Codex native runtime
+
+`CodexAdapter` implements the shared `StreamingProviderAdapter` contract and executes the official Codex CLI through an existing ChatGPT subscription. The initial request is written through standard input, so private task text is not placed in the process argument list. Each run uses JSON Lines output, the `workspace-write` sandbox, disabled command network access and web search, no escalation prompts, no login shell and a filtered child environment. Provider stderr, native command output, account paths and credential material are never copied into normalized events.
+
+Every `CodexAccountSlot` owns an independent `CODEX_HOME` below private runtime storage. The full slot directory is sensitive because it contains authentication and Codex session history. `CodexAccountPool` checks CLI authentication and selects available slots in deterministic round robin order. A selected slot remains bound to its session for follow up messages. The adapter never changes accounts during an active turn and never retries failed file work on another account, which prevents duplicate mutations. Logical slot names contain no email address or account identity.
+
+Provider health reports only observed login availability. It does not claim remaining quota, rate limit state or subscription entitlement that the CLI did not expose. Usage events preserve token counts reported by Codex and leave dollar cost unknown because subscription activity has no per request API price in this adapter.
+
+Native Codex messages are translated into the shared text, plan, tool, file, usage, error and completion contract. File events retain only safe worktree relative paths. Provider failures and malformed messages become fixed sanitized errors. Continued messages use the original Codex thread and account. Resume after an application restart remains explicitly unsupported until the account binding is persisted durably.
+
+Account rotation is an availability and separation feature for accounts the operator is authorized to use. It is not a quota bypass mechanism, and operators remain responsible for the applicable service terms.
 
 `CancellationService` validates provider and durable job identity before requesting cancellation. Acknowledgement alone does not change durable state. Only a matching normalized completion event with cancelled status permits one atomic terminal transition through a job scoped idempotency key. Retries return the committed event, conflicts fail closed, and cancellation preserves the recorded worktree for later review and cleanup policy.
 
