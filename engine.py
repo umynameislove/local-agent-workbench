@@ -418,6 +418,7 @@ class AdapterStart:
     request: str
     worktree: Path
     required: frozenset[ProviderCapability] = frozenset()
+    allowed_write_paths: tuple[str, ...] = (".",)
 
     def __post_init__(self) -> None:
         _adapter_text(self.job_id, "job_id")
@@ -428,14 +429,19 @@ class AdapterStart:
             not isinstance(item, ProviderCapability) for item in self.required
         ):
             raise TypeError("Adapter requirements must be typed immutable capabilities.")
+        if not isinstance(self.allowed_write_paths, tuple) or not self.allowed_write_paths:
+            raise TypeError("Adapter allowed write paths must be a nonempty tuple.")
+        if any(not isinstance(path, str) for path in self.allowed_write_paths):
+            raise TypeError("Adapter allowed write paths must contain strings.")
 
 
 class ProviderAdapter(Protocol):
     """Async control boundary; implementations keep provider SDK types private.
 
-    Session methods must reject mismatched runtime or job identity. Unsupported
-    operations raise AdapterUnsupportedError. Implementations translate provider
-    failures to sanitized AdapterError and preserve task cancellation.
+    Session methods must reject mismatched runtime or job identity. File capable
+    adapters must enforce the immutable worktree and allowed write paths.
+    Unsupported operations raise AdapterUnsupportedError. Implementations translate
+    provider failures to sanitized AdapterError and preserve task cancellation.
     """
 
     @property

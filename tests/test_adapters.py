@@ -159,3 +159,7 @@ def test_start_rejects_relative_paths_and_mutable_requirements(tmp_path: Path) -
         AdapterStart("job", "request", Path("relative"))
     with pytest.raises(TypeError):
         AdapterStart("job", "request", tmp_path, {ProviderCapability.PLAN})
+    with pytest.raises(TypeError):
+        AdapterStart("job", "request", tmp_path, allowed_write_paths=[])
+    with pytest.raises(TypeError):
+        AdapterStart("job", "request", tmp_path, allowed_write_paths=("src", Path("docs")))
