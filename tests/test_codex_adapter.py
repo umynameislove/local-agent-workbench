@@ -70,6 +70,27 @@ def fake_codex(tmp_path: Path) -> Path:
                     flush=True,
                 )
                 raise SystemExit(9)
+            if prompt.startswith("file:"):
+                change = {{
+                    "type": "item.completed",
+                    "item": {{
+                        "id": "change-1",
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [{{"path": prompt[5:], "kind": "update"}}],
+                    }},
+                }}
+                print(json.dumps(change), flush=True)
+                print(
+                    json.dumps(
+                        {{
+                            "type": "turn.completed",
+                            "usage": {{"input_tokens": 7, "output_tokens": 2}},
+                        }}
+                    ),
+                    flush=True,
+                )
+                raise SystemExit(0)
 
             started = {{
                 "type": "item.started",
@@ -170,6 +191,49 @@ async def test_scoped_task_streams_normalized_events(tmp_path: Path, fake_codex:
 
 
 @pytest.mark.anyio
+async def test_file_events_enforce_the_adapter_write_boundary(
+    tmp_path: Path,
+    fake_codex: Path,
+) -> None:
+    provider = adapter(tmp_path, fake_codex, ("primary",))
+    (tmp_path / "src").mkdir()
+    allowed = await provider.start(
+        AdapterStart(
+            "allowed",
+            "file:src/app.py",
+            tmp_path,
+            allowed_write_paths=("src",),
+        )
+    )
+    allowed_events = await collect(provider, allowed)
+
+    assert [event.kind for event in allowed_events] == [
+        RuntimeEventKind.FILE,
+        RuntimeEventKind.USAGE,
+        RuntimeEventKind.COMPLETION,
+    ]
+    assert allowed_events[0].payload == {"path": "src/app.py", "action": "modified"}
+
+    denied = await provider.start(
+        AdapterStart(
+            "denied",
+            "file:../private-outside.txt",
+            tmp_path,
+            allowed_write_paths=("src",),
+        )
+    )
+    denied_events = await collect(provider, denied)
+    serialized = json.dumps([event.to_dict() for event in denied_events])
+
+    assert [event.kind for event in denied_events] == [
+        RuntimeEventKind.ERROR,
+        RuntimeEventKind.COMPLETION,
+    ]
+    assert denied_events[0].payload["code"] == "codex_adapter_failed"
+    assert "private-outside" not in serialized
+
+
+@pytest.mark.anyio
 async def test_start_uses_safe_flags_stdin_and_filtered_environment(
     tmp_path: Path,
     fake_codex: Path,
@@ -195,15 +259,85 @@ async def test_start_uses_safe_flags_stdin_and_filtered_environment(
     assert record["parent_secret"] is None
     assert "--json" in arguments
     assert "--ignore-user-config" in arguments
+    assert "--ignore-rules" in arguments
+    assert "--strict-config" in arguments
     assert arguments[arguments.index("--sandbox") + 1] == "workspace-write"
     assert 'approval_policy="never"' in arguments
     assert "sandbox_workspace_write.network_access=false" in arguments
+    assert "sandbox_workspace_write.exclude_tmpdir_env_var=true" in arguments
+    assert "sandbox_workspace_write.exclude_slash_tmp=true" in arguments
     assert "allow_login_shell=false" in arguments
     assert 'web_search="disabled"' in arguments
+    assert "features.apps=false" in arguments
+    assert "features.hooks=false" in arguments
+    assert "agents.enabled=false" in arguments
     assert "--approve-for-me" not in arguments
     assert "--dangerously-bypass-approvals-and-sandbox" not in arguments
     assert arguments[arguments.index("--model") + 1] == "gpt-test"
     assert arguments[-1] == "-"
+
+
+@pytest.mark.anyio
+async def test_explicit_allowed_directories_become_the_only_codex_workspace_roots(
+    tmp_path: Path,
+    fake_codex: Path,
+) -> None:
+    source = tmp_path / "src"
+    docs = tmp_path / "docs"
+    source.mkdir()
+    docs.mkdir()
+    pool = authenticated_accounts(tmp_path, ("primary",))
+    provider = CodexAdapter(
+        pool,
+        executable=str(fake_codex),
+        login_timeout=2,
+        session_timeout=2,
+    )
+
+    session = await provider.start(
+        AdapterStart(
+            "job",
+            "task",
+            tmp_path,
+            allowed_write_paths=("src", "docs"),
+        )
+    )
+    await collect(provider, session)
+    arguments = calls(pool.slots[0].home)[0]["args"]
+
+    assert arguments[arguments.index("--cd") + 1] == str(source)
+    assert arguments[arguments.index("--add-dir") + 1] == str(docs)
+    assert str(tmp_path) not in (
+        arguments[arguments.index("--cd") + 1],
+        arguments[arguments.index("--add-dir") + 1],
+    )
+
+
+@pytest.mark.anyio
+async def test_replaced_allowed_directory_blocks_followup_before_process_start(
+    tmp_path: Path,
+    fake_codex: Path,
+) -> None:
+    source = tmp_path / "src"
+    source.mkdir()
+    pool = authenticated_accounts(tmp_path, ("primary",))
+    provider = CodexAdapter(
+        pool,
+        executable=str(fake_codex),
+        login_timeout=2,
+        session_timeout=2,
+    )
+    session = await provider.start(
+        AdapterStart("job", "first", tmp_path, allowed_write_paths=("src",))
+    )
+    await collect(provider, session)
+    source.rename(tmp_path / "original-src")
+    source.mkdir()
+
+    with pytest.raises(AdapterError, match="write boundary is unavailable"):
+        await provider.send(session, "second")
+
+    assert len(calls(pool.slots[0].home)) == 1
 
 
 @pytest.mark.anyio
@@ -300,11 +434,18 @@ async def test_followup_stays_on_original_account_and_preserves_sequence(
     assert resume_arguments[resume_index + 1] == session.session_id
     assert resume_arguments[-1] == "-"
     assert resume_arguments[resume_arguments.index("--sandbox") + 1] == "workspace-write"
+    assert "--ignore-rules" in resume_arguments
+    assert "--strict-config" in resume_arguments
     assert resume_arguments[resume_arguments.index("--cd") + 1] == str(tmp_path)
     assert 'approval_policy="never"' in resume_arguments
     assert "sandbox_workspace_write.network_access=false" in resume_arguments
+    assert "sandbox_workspace_write.exclude_tmpdir_env_var=true" in resume_arguments
+    assert "sandbox_workspace_write.exclude_slash_tmp=true" in resume_arguments
     assert "allow_login_shell=false" in resume_arguments
     assert 'web_search="disabled"' in resume_arguments
+    assert "features.apps=false" in resume_arguments
+    assert "features.hooks=false" in resume_arguments
+    assert "agents.enabled=false" in resume_arguments
     assert "--approve-for-me" not in resume_arguments
     assert "--dangerously-bypass-approvals-and-sandbox" not in resume_arguments
 
@@ -438,11 +579,55 @@ async def test_duplicate_job_and_invalid_worktree_fail_closed(
 
     with pytest.raises(AdapterError, match="already started"):
         await provider.start(AdapterStart("job", "again", tmp_path))
-    with pytest.raises(AdapterError, match="worktree is unavailable"):
+    with pytest.raises(AdapterError, match="write boundary is unavailable"):
         await provider.start(AdapterStart("other", "task", tmp_path / "missing"))
     with pytest.raises(AdapterError, match="surrounding whitespace"):
         await provider.start(AdapterStart(" spaced ", "task", tmp_path))
     await collect(provider, session)
+
+
+@pytest.mark.anyio
+async def test_symlinked_worktree_is_rejected_before_account_use(
+    tmp_path: Path,
+    fake_codex: Path,
+) -> None:
+    pool = authenticated_accounts(tmp_path, ("primary",))
+    provider = CodexAdapter(
+        pool,
+        executable=str(fake_codex),
+        login_timeout=2,
+        session_timeout=2,
+    )
+    real = tmp_path / "real-worktree"
+    real.mkdir()
+    alias = tmp_path / "worktree-alias"
+    alias.symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(AdapterError, match="write boundary is unavailable"):
+        await provider.start(AdapterStart("job", "task", alias))
+
+    assert calls(pool.slots[0].home) == []
+
+
+@pytest.mark.anyio
+async def test_missing_allowed_directory_is_rejected_before_account_use(
+    tmp_path: Path,
+    fake_codex: Path,
+) -> None:
+    pool = authenticated_accounts(tmp_path, ("primary",))
+    provider = CodexAdapter(
+        pool,
+        executable=str(fake_codex),
+        login_timeout=2,
+        session_timeout=2,
+    )
+
+    with pytest.raises(AdapterError, match="write boundary is unavailable"):
+        await provider.start(
+            AdapterStart("job", "task", tmp_path, allowed_write_paths=("missing",))
+        )
+
+    assert calls(pool.slots[0].home) == []
 
 
 @pytest.mark.anyio

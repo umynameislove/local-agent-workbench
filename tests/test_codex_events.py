@@ -129,10 +129,9 @@ def test_failed_tool_and_missing_call_identity_are_normalized(tmp_path: Path) ->
     }
 
 
-def test_file_changes_keep_only_safe_worktree_relative_paths(tmp_path: Path) -> None:
+def test_file_changes_emit_only_authorized_worktree_relative_paths(tmp_path: Path) -> None:
     worktree = tmp_path / "repo"
     worktree.mkdir()
-    outside = tmp_path / "outside.txt"
     events = active_translator(worktree).feed(
         line(
             {
@@ -144,9 +143,6 @@ def test_file_changes_keep_only_safe_worktree_relative_paths(tmp_path: Path) -> 
                         {"path": "src/new.py", "kind": "add"},
                         {"path": str(worktree / "README.md"), "kind": "update"},
                         {"path": "old.py", "kind": "delete"},
-                        {"path": "../escape", "kind": "update"},
-                        {"path": str(outside), "kind": "update"},
-                        {"path": "ignored", "kind": "unknown"},
                     ],
                 },
             }
@@ -158,6 +154,121 @@ def test_file_changes_keep_only_safe_worktree_relative_paths(tmp_path: Path) -> 
         {"path": "README.md", "action": "modified"},
         {"path": "old.py", "action": "deleted"},
     ]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "../escape.py",
+        "/outside.py",
+        ".git/config",
+        ".codex/config.toml",
+        ".agents/policy.toml",
+        "src/../escape.py",
+        "src//ambiguous.py",
+    ],
+)
+def test_file_change_boundary_violations_fail_closed(tmp_path: Path, path: str) -> None:
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    stream = active_translator(worktree)
+
+    with pytest.raises(CodexNativeProtocolError, match="write policy"):
+        stream.feed(
+            line(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [{"path": path, "kind": "update"}],
+                    },
+                }
+            )
+        )
+
+
+def test_file_change_symlink_escape_fails_closed(tmp_path: Path) -> None:
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (worktree / "escape").symlink_to(outside, target_is_directory=True)
+    stream = active_translator(worktree)
+
+    with pytest.raises(CodexNativeProtocolError, match="write policy"):
+        stream.feed(
+            line(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [{"path": "escape/private.txt", "kind": "update"}],
+                    },
+                }
+            )
+        )
+
+
+def test_file_change_batch_is_rejected_before_any_event_is_created(tmp_path: Path) -> None:
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    stream = active_translator(worktree)
+
+    with pytest.raises(CodexNativeProtocolError, match="write policy"):
+        stream.feed(
+            line(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [
+                            {"path": "src/app.py", "kind": "update"},
+                            {"path": "../escape.py", "kind": ["update"]},
+                        ],
+                    },
+                }
+            )
+        )
+
+    assert stream.next_sequence == 1
+
+
+def test_file_changes_respect_explicit_allowed_paths(tmp_path: Path) -> None:
+    worktree = tmp_path / "repo"
+    worktree.mkdir()
+    allowed = active_translator(worktree, allowed_write_paths=("src",))
+    event = allowed.feed(
+        line(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "file_change",
+                    "status": "completed",
+                    "changes": [{"path": "src/app.py", "kind": "add"}],
+                },
+            }
+        )
+    )[0]
+
+    assert event.payload == {"path": "src/app.py", "action": "created"}
+
+    denied = active_translator(worktree, allowed_write_paths=("src",))
+    with pytest.raises(CodexNativeProtocolError, match="write policy"):
+        denied.feed(
+            line(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "status": "completed",
+                        "changes": [{"path": "README.md", "kind": "update"}],
+                    },
+                }
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -251,6 +362,7 @@ def test_invalid_usage_counts_remain_truthfully_unknown(tmp_path: Path) -> None:
         ({"first_sequence": 0}, ValueError),
         ({"expected_session_id": ""}, ValueError),
         ({"max_line_bytes": 0}, ValueError),
+        ({"allowed_write_paths": []}, TypeError),
     ],
 )
 def test_translator_rejects_invalid_boundaries(tmp_path: Path, kwargs, error) -> None:

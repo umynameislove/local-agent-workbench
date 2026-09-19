@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from engine import JobRuntime, RuntimeEvent, RuntimeEventKind
+from write_boundary import WriteBoundary, WriteBoundaryError
 
 
 class CodexNativeProtocolError(RuntimeError):
@@ -24,6 +25,7 @@ class CodexEventTranslator:
         first_sequence: int = 1,
         expected_session_id: str | None = None,
         max_line_bytes: int = 1_048_576,
+        allowed_write_paths: tuple[str, ...] = (".",),
     ) -> None:
         if not isinstance(job_id, str) or not job_id.strip() or "\x00" in job_id:
             raise ValueError("Codex event job identity is invalid.")
@@ -40,7 +42,7 @@ class CodexEventTranslator:
         if type(max_line_bytes) is not int or max_line_bytes < 1:
             raise ValueError("Codex stream limit must be positive.")
         self._job_id = job_id
-        self._worktree = worktree
+        self._write_boundary = WriteBoundary(worktree, allowed_write_paths)
         self._next_sequence = first_sequence
         self._session_id: str | None = None
         self._expected_session_id = expected_session_id
@@ -233,33 +235,30 @@ class CodexEventTranslator:
             "modify": "modified",
             "update": "modified",
         }
-        events: list[RuntimeEvent] = []
+        normalized: list[tuple[str, str]] = []
         for change in changes:
             if not isinstance(change, Mapping):
-                continue
+                raise CodexNativeProtocolError("Codex file change violated write policy.")
+            requested_action = change.get("kind") or change.get("action")
+            action = actions.get(requested_action) if isinstance(requested_action, str) else None
+            if action is None:
+                raise CodexNativeProtocolError("Codex file change violated write policy.")
             path = self._relative_path(change.get("path"))
-            action = actions.get(change.get("kind") or change.get("action"))
-            if path is not None and action is not None:
-                events.append(self._event(RuntimeEventKind.FILE, {"path": path, "action": action}))
-        return tuple(events)
+            normalized.append((path, action))
+        if not normalized:
+            raise CodexNativeProtocolError("Codex file change violated write policy.")
+        return tuple(
+            self._event(RuntimeEventKind.FILE, {"path": path, "action": action})
+            for path, action in normalized
+        )
 
-    def _relative_path(self, value: object) -> str | None:
-        if not isinstance(value, str) or not value or "\x00" in value:
-            return None
-        path = Path(value)
-        if path.is_absolute():
-            try:
-                path = path.relative_to(self._worktree)
-            except ValueError:
-                return None
-        pure = PurePosixPath(path.as_posix())
-        if (
-            pure.is_absolute()
-            or not pure.parts
-            or any(part in ("", ".", "..") for part in pure.parts)
-        ):
-            return None
-        return pure.as_posix()
+    def _relative_path(self, value: object) -> str:
+        if not isinstance(value, str):
+            raise CodexNativeProtocolError("Codex file change violated write policy.")
+        try:
+            return self._write_boundary.relative_path(value)
+        except (TypeError, ValueError, WriteBoundaryError) as error:
+            raise CodexNativeProtocolError("Codex file change violated write policy.") from error
 
     @staticmethod
     def _decode(line: bytes) -> dict[str, Any]:

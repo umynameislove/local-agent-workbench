@@ -27,6 +27,7 @@ from engine import (
     RuntimeEvent,
     run_process,
 )
+from write_boundary import WriteBoundary, WriteBoundaryError
 
 _STREAM_END = object()
 _PASSTHROUGH_ENVIRONMENT = (
@@ -61,6 +62,8 @@ class _SessionState:
     job_id: str
     account: CodexAccountSlot
     worktree: Path
+    write_boundary: WriteBoundary
+    writable_roots: tuple[Path, ...]
     session: AdapterSession | None = None
     next_sequence: int = 1
     turn: _Turn | None = None
@@ -165,11 +168,11 @@ class CodexAdapter:
             raise AdapterError("Codex job identity must not have surrounding whitespace.")
         self.capabilities.require(request.required)
         try:
-            worktree = request.worktree.resolve(strict=True)
-        except (OSError, RuntimeError):
-            raise AdapterError("Codex worktree is unavailable.") from None
-        if not worktree.is_dir():
-            raise AdapterError("Codex worktree is unavailable.")
+            write_boundary = WriteBoundary(request.worktree, request.allowed_write_paths)
+            writable_roots = write_boundary.writable_roots()
+        except (TypeError, ValueError, WriteBoundaryError):
+            raise AdapterError("Codex write boundary is unavailable.") from None
+        worktree = write_boundary.root
         async with self._registry_lock:
             if request.job_id in self._states or request.job_id in self._reserved_jobs:
                 raise AdapterError("Codex job already started.")
@@ -177,7 +180,13 @@ class CodexAdapter:
         state: _SessionState | None = None
         try:
             account = await self._accounts.acquire(self._authenticated)
-            state = _SessionState(request.job_id, account, worktree)
+            state = _SessionState(
+                request.job_id,
+                account,
+                worktree,
+                write_boundary,
+                writable_roots,
+            )
             turn = self._launch(state, self._start_command(state), request.request)
             await self._await_spawn(turn)
             session = await self._await_session(state, turn)
@@ -257,6 +266,8 @@ class CodexAdapter:
             "--color",
             "never",
             "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
             "--sandbox",
             "workspace-write",
             "--config",
@@ -264,12 +275,24 @@ class CodexAdapter:
             "--config",
             "sandbox_workspace_write.network_access=false",
             "--config",
+            "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+            "--config",
+            "sandbox_workspace_write.exclude_slash_tmp=true",
+            "--config",
             "allow_login_shell=false",
             "--config",
             'web_search="disabled"',
+            "--config",
+            "features.apps=false",
+            "--config",
+            "features.hooks=false",
+            "--config",
+            "agents.enabled=false",
             "--cd",
-            str(state.worktree),
+            str(state.writable_roots[0]),
         ]
+        for root in state.writable_roots[1:]:
+            command.extend(("--add-dir", str(root)))
         if self._model is not None:
             command.extend(("--model", self._model))
         command.append("-")
@@ -284,6 +307,8 @@ class CodexAdapter:
             "--color",
             "never",
             "--ignore-user-config",
+            "--ignore-rules",
+            "--strict-config",
             "--sandbox",
             "workspace-write",
             "--config",
@@ -291,24 +316,43 @@ class CodexAdapter:
             "--config",
             "sandbox_workspace_write.network_access=false",
             "--config",
+            "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+            "--config",
+            "sandbox_workspace_write.exclude_slash_tmp=true",
+            "--config",
             "allow_login_shell=false",
             "--config",
             'web_search="disabled"',
+            "--config",
+            "features.apps=false",
+            "--config",
+            "features.hooks=false",
+            "--config",
+            "agents.enabled=false",
             "--cd",
-            str(state.worktree),
+            str(state.writable_roots[0]),
         ]
+        for root in state.writable_roots[1:]:
+            command.extend(("--add-dir", str(root)))
         if self._model is not None:
             command.extend(("--model", self._model))
         command.extend(("resume", state.session.session_id, "-"))
         return tuple(command)
 
     def _launch(self, state: _SessionState, command: tuple[str, ...], prompt: str) -> _Turn:
+        try:
+            writable_roots = state.write_boundary.writable_roots()
+        except WriteBoundaryError:
+            raise AdapterError("Codex write boundary is unavailable.") from None
+        if writable_roots != state.writable_roots:
+            raise AdapterError("Codex write boundary is unavailable.")
         translator = CodexEventTranslator(
             state.job_id,
             state.worktree,
             first_sequence=state.next_sequence,
             expected_session_id=None if state.session is None else state.session.session_id,
             max_line_bytes=self._max_line_bytes,
+            allowed_write_paths=state.write_boundary.allowed_paths,
         )
         turn = _Turn(translator, spawned=asyncio.get_running_loop().create_future())
         state.turn = turn

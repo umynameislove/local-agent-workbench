@@ -119,6 +119,10 @@ Provider health reports only observed login availability. It does not claim rema
 
 Native Codex messages are translated into the shared text, plan, tool, file, usage, error and completion contract. File events retain only safe worktree relative paths. Provider failures and malformed messages become fixed sanitized errors. Continued messages use the original Codex thread and account. Resume after an application restart remains explicitly unsupported until the account binding is persisted durably.
 
+`WriteBoundary` anchors every file capable Codex session to one canonical worktree and an immutable tuple of allowed relative directories. Path validation rejects traversal, protected control metadata, existing symlink or hard link aliases, special files, replaced roots and paths outside the allowlist. Each allowed directory must exist before execution. An invalid provider file report ends the turn with sanitized events instead of accepting a partial batch.
+
+The same verified directories become the Codex `workspace-write` roots, while temporary directory writes, command network access, apps, hooks and subagents remain disabled. Application path checks do not treat provider output as proof that an unreported write was safe. Later review and promotion stages must inspect the actual worktree before accepting changes.
+
 Account rotation is an availability and separation feature for accounts the operator is authorized to use. It is not a quota bypass mechanism, and operators remain responsible for the applicable service terms.
 
 `CancellationService` validates provider and durable job identity before requesting cancellation. Acknowledgement alone does not change durable state. Only a matching normalized completion event with cancelled status permits one atomic terminal transition through a job scoped idempotency key. Retries return the committed event, conflicts fail closed, and cancellation preserves the recorded worktree for later review and cleanup policy.
