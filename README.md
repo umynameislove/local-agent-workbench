@@ -125,6 +125,14 @@ The same verified directories become the Codex `workspace-write` roots, while te
 
 Account rotation is an availability and separation feature for accounts the operator is authorized to use. It is not a quota bypass mechanism, and operators remain responsible for the applicable service terms.
 
+## Read only review diff
+
+`ReadOnlyDiffService` compares an isolated worktree with its immutable snapshot commit and returns a deterministic inventory of staged, unstaged, deleted, renamed and untracked files. Collection does not change `HEAD`, the index or worktree content. Repository hooks, external diff programs, text conversion programs and configured content filters cannot execute during inspection.
+
+Every path passes the canonical worktree boundary before content is read. Symlinks, hard links, special files, submodules, malformed paths and changing repository state fail closed with sanitized errors. Binary and oversized content is represented only by file status and byte counts. Text patches are included only as complete UTF 8 unified diffs within explicit file count, file size, context and total output limits.
+
+The service reads raw worktree content instead of trusting repository supplied conversion programs. It verifies `HEAD`, Git configuration, changed file inventory and file identity again before returning a result. The API route and review interface consume this service in later vertical slice tasks.
+
 `CancellationService` validates provider and durable job identity before requesting cancellation. Acknowledgement alone does not change durable state. Only a matching normalized completion event with cancelled status permits one atomic terminal transition through a job scoped idempotency key. Retries return the committed event, conflicts fail closed, and cancellation preserves the recorded worktree for later review and cleanup policy.
 
 `GET /api/jobs/{id}/events` replays the durable job event ledger and follows newly persisted events as Server Sent Events. Each data frame carries the stable database event identifier, job sequence, event type, payload and persistence timestamp. Clients reconnect with `Last-Event-ID`; the server resumes after the matching job event without a gap or duplicate. Idle connections receive comment heartbeats that never advance the cursor. Invalid cross job cursors fail before streaming begins, and storage failures close the connection with a sanitized control event.
