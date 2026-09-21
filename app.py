@@ -52,6 +52,13 @@ from planning import (
     PlanningUnavailableError,
     ReadOnlyPlanningService,
 )
+from secret_gate import (
+    PreReviewSecretGate,
+    SecretGateBlockedError,
+    SecretGateConflictError,
+    SecretGateNotFoundError,
+    SecretGateUnavailableError,
+)
 from verification import VerificationRunner
 from worktree import (
     WorktreeConflictError,
@@ -104,6 +111,11 @@ def create_app(
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
         app.state.verification_repository = VerificationRepository(database)
         app.state.atomic_transition_service = AtomicTransitionService(database)
+        app.state.secret_gate = PreReviewSecretGate(
+            app.state.job_repository,
+            app.state.event_repository,
+            app.state.atomic_transition_service,
+        )
         app.state.planning_service = ReadOnlyPlanningService(
             app.state.job_repository,
             app.state.event_repository,
@@ -262,6 +274,27 @@ def create_app(
         except WorktreeConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except WorktreeUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.post("/api/jobs/{job_id}/review-readiness")
+    async def review_readiness(request: Request, job_id: str) -> dict[str, object]:
+        service: PreReviewSecretGate = request.app.state.secret_gate
+        try:
+            return (await service.evaluate(job_id)).to_dict()
+        except SecretGateNotFoundError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except SecretGateBlockedError as error:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": str(error),
+                    "event_id": error.event_id,
+                    "scan": error.scan.to_dict(),
+                },
+            ) from error
+        except SecretGateConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except SecretGateUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
     return api
