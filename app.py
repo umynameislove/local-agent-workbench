@@ -27,6 +27,7 @@ from db import (
     ProjectRepository,
     RecoveryService,
     UsageRepository,
+    VerificationRepository,
 )
 from engine import (
     APP_VERSION,
@@ -51,6 +52,7 @@ from planning import (
     PlanningUnavailableError,
     ReadOnlyPlanningService,
 )
+from verification import VerificationRunner
 from worktree import (
     WorktreeConflictError,
     WorktreeManager,
@@ -100,6 +102,7 @@ def create_app(
         app.state.planner_repository = PlannerRepository(database)
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
+        app.state.verification_repository = VerificationRepository(database)
         app.state.atomic_transition_service = AtomicTransitionService(database)
         app.state.planning_service = ReadOnlyPlanningService(
             app.state.job_repository,
@@ -111,6 +114,10 @@ def create_app(
             app.state.event_repository,
             app.state.atomic_transition_service,
             runtime.worktrees,
+        )
+        app.state.verification_runner = VerificationRunner(
+            app.state.job_repository,
+            app.state.verification_repository,
         )
         app.state.recovery_service = RecoveryService(database, runtime.worktrees)
         app.state.recovery_items = app.state.recovery_service.load()

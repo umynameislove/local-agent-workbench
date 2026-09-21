@@ -31,6 +31,11 @@ class ProcessRunnerError(RuntimeError):
 class ProcessTimeoutError(ProcessRunnerError):
     """Raised after a timed out process has been terminated and reaped."""
 
+    def __init__(self, message: str, *, stdout: bytes = b"", stderr: bytes = b"") -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
+
 
 @dataclass(frozen=True)
 class ProcessResult:
@@ -120,10 +125,14 @@ async def run_process(
         return ProcessResult(process.returncode, stdout, stderr)
     except (asyncio.CancelledError, TimeoutError) as error:
         await finish(asyncio.create_task(reap(process)))
-        await finish(communication)
+        stdout, stderr = await finish(communication)
         if isinstance(error, asyncio.CancelledError):
             raise
-        raise ProcessTimeoutError("Process timed out.") from None
+        raise ProcessTimeoutError(
+            "Process timed out.",
+            stdout=stdout,
+            stderr=stderr,
+        ) from None
 
 
 class ConfigurationError(ValueError):
@@ -249,6 +258,12 @@ class JobRuntime(StrEnum):
     CLAUDE = "claude"
     CODEX = "codex"
     LOCAL = "local"
+
+
+class VerificationOutcome(StrEnum):
+    PASSED = "passed"
+    FAILED = "failed"
+    TIMED_OUT = "timed_out"
 
 
 class ProviderCapability(StrEnum):
@@ -1068,6 +1083,18 @@ class MemoryReferenceCreate:
     projmem_record_id: str
     job_id: str
     event_id: int | None = None
+
+
+@dataclass(frozen=True)
+class VerificationCreate:
+    job_id: str
+    command_args: tuple[str, ...]
+    outcome: VerificationOutcome
+    exit_code: int | None
+    duration_ms: int
+    output_digest: str
+    stdout_bytes: int
+    stderr_bytes: int
 
 
 @dataclass(frozen=True)

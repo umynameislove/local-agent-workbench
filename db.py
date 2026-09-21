@@ -35,6 +35,8 @@ from engine import (
     RecoveryIssue,
     Sensitivity,
     UsageCreate,
+    VerificationCreate,
+    VerificationOutcome,
     validate_job_transition,
 )
 
@@ -191,6 +193,18 @@ class MemoryReferenceNotFoundError(MemoryReferenceRepositoryError):
     """Raised when a requested projmem reference does not exist."""
 
 
+class VerificationRepositoryError(DatabaseError):
+    """Base error for safe verification evidence persistence failures."""
+
+
+class VerificationValidationError(VerificationRepositoryError):
+    """Raised when verification evidence violates the persistence contract."""
+
+
+class VerificationNotFoundError(VerificationRepositoryError):
+    """Raised when requested verification evidence does not exist."""
+
+
 class RecoveryServiceError(DatabaseError):
     """Raised when durable restart state cannot be loaded safely."""
 
@@ -326,6 +340,20 @@ class MemoryReferenceRecord:
     projmem_record_id: str
     job_id: str
     event_id: int | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class VerificationRecord:
+    id: int
+    job_id: str
+    command_args: tuple[str, ...]
+    outcome: VerificationOutcome
+    exit_code: int | None
+    duration_ms: int
+    output_digest: str
+    stdout_bytes: int
+    stderr_bytes: int
     created_at: str
 
 
@@ -864,6 +892,61 @@ MIGRATIONS = (
             BEFORE DELETE ON memory_refs
             BEGIN
                 SELECT RAISE(ABORT, 'Memory references are immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=10,
+        name="create_verification_runs",
+        statements=(
+            """
+            CREATE TABLE verification_runs (
+                id INTEGER PRIMARY KEY CHECK (id > 0),
+                job_id TEXT NOT NULL
+                    REFERENCES jobs(id) ON DELETE RESTRICT,
+                command_args TEXT NOT NULL CHECK (
+                    json_valid(command_args)
+                    AND json_type(command_args) = 'array'
+                    AND json_array_length(command_args) > 0
+                    AND length(CAST(command_args AS BLOB)) <= 65536
+                ),
+                outcome TEXT NOT NULL CHECK (
+                    outcome IN ('passed', 'failed', 'timed_out')
+                ),
+                exit_code INTEGER,
+                duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+                output_digest TEXT NOT NULL CHECK (
+                    length(output_digest) = 64
+                    AND output_digest NOT GLOB '*[^0-9a-f]*'
+                ),
+                stdout_bytes INTEGER NOT NULL CHECK (stdout_bytes >= 0),
+                stderr_bytes INTEGER NOT NULL CHECK (stderr_bytes >= 0),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                CHECK (
+                    (outcome = 'passed' AND exit_code = 0)
+                    OR (outcome = 'failed' AND exit_code IS NOT NULL AND exit_code != 0)
+                    OR (outcome = 'timed_out' AND exit_code IS NULL)
+                )
+            )
+            """,
+            """
+            CREATE INDEX verification_runs_job_created_idx
+            ON verification_runs (job_id, created_at, id)
+            """,
+            """
+            CREATE TRIGGER verification_runs_prevent_update
+            BEFORE UPDATE ON verification_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'Verification evidence is immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER verification_runs_prevent_delete
+            BEFORE DELETE ON verification_runs
+            BEGIN
+                SELECT RAISE(ABORT, 'Verification evidence is immutable.');
             END
             """,
         ),
@@ -3469,3 +3552,217 @@ class MemoryReferenceRepository(_Repository):
             raise MemoryReferenceRepositoryError(
                 "Stored memory reference data is invalid."
             ) from error
+
+
+class VerificationRepository(_Repository):
+    """Persist immutable verification evidence without storing command output."""
+
+    error_type = VerificationRepositoryError
+    storage_name = "Verification"
+    _maximum_integer = 9_223_372_036_854_775_807
+
+    def record(self, evidence: VerificationCreate) -> VerificationRecord:
+        command_args = self._validate_evidence(evidence)
+        with self._write_connection() as connection:
+            try:
+                result = connection.execute(
+                    """
+                    INSERT INTO verification_runs (
+                        job_id, command_args, outcome, exit_code, duration_ms,
+                        output_digest, stdout_bytes, stderr_bytes
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        evidence.job_id,
+                        command_args,
+                        evidence.outcome.value,
+                        evidence.exit_code,
+                        evidence.duration_ms,
+                        evidence.output_digest,
+                        evidence.stdout_bytes,
+                        evidence.stderr_bytes,
+                    ),
+                )
+                row = self._select_by_id(connection, result.lastrowid)
+                if row is None:
+                    raise VerificationRepositoryError(
+                        "Verification evidence could not be recorded."
+                    )
+                stored = self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                if getattr(error, "sqlite_errorname", "") == "SQLITE_CONSTRAINT_FOREIGNKEY":
+                    raise VerificationValidationError("Verification job does not exist.") from error
+                raise VerificationRepositoryError(
+                    "Verification evidence could not be recorded."
+                ) from error
+        return stored
+
+    def get(self, evidence_id: int) -> VerificationRecord:
+        normalized_id = self._validate_integer(evidence_id, field="id", positive=True)
+        with self._connection() as connection:
+            row = self._select_by_id(connection, normalized_id)
+        if row is None:
+            raise VerificationNotFoundError("Verification evidence does not exist.")
+        return self._to_record(row)
+
+    def list(self, *, job_id: str | None = None) -> tuple[VerificationRecord, ...]:
+        parameters: tuple[str, ...] = ()
+        where = ""
+        if job_id is not None:
+            parameters = (self._validate_text(job_id, field="job_id"),)
+            where = "WHERE job_id = ?"
+        with self._connection() as connection:
+            rows = connection.execute(
+                f"""
+                SELECT id, job_id, command_args, outcome, exit_code, duration_ms,
+                       output_digest, stdout_bytes, stderr_bytes, created_at
+                FROM verification_runs
+                {where}
+                ORDER BY created_at, id
+                """,
+                parameters,
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
+    @staticmethod
+    def _select_by_id(
+        connection: sqlite3.Connection,
+        evidence_id: object,
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT id, job_id, command_args, outcome, exit_code, duration_ms,
+                   output_digest, stdout_bytes, stderr_bytes, created_at
+            FROM verification_runs
+            WHERE id = ?
+            """,
+            (evidence_id,),
+        ).fetchone()
+
+    @classmethod
+    def _validate_evidence(cls, evidence: VerificationCreate) -> str:
+        if not isinstance(evidence, VerificationCreate):
+            raise VerificationValidationError(
+                "Verification must use the supported creation contract."
+            )
+        cls._validate_text(evidence.job_id, field="job_id")
+        command_args = cls._serialize_arguments(evidence.command_args)
+        if not isinstance(evidence.outcome, VerificationOutcome):
+            raise VerificationValidationError("Verification outcome is invalid.")
+        if evidence.exit_code is not None:
+            cls._validate_integer(evidence.exit_code, field="exit_code", positive=False)
+        if (
+            (evidence.outcome is VerificationOutcome.PASSED and evidence.exit_code != 0)
+            or (
+                evidence.outcome is VerificationOutcome.FAILED
+                and (evidence.exit_code is None or evidence.exit_code == 0)
+            )
+            or (
+                evidence.outcome is VerificationOutcome.TIMED_OUT and evidence.exit_code is not None
+            )
+        ):
+            raise VerificationValidationError(
+                "Verification outcome and exit code are inconsistent."
+            )
+        for field, value in (
+            ("duration_ms", evidence.duration_ms),
+            ("stdout_bytes", evidence.stdout_bytes),
+            ("stderr_bytes", evidence.stderr_bytes),
+        ):
+            cls._validate_integer(value, field=field, positive=False, nonnegative=True)
+        digest = evidence.output_digest
+        if (
+            not isinstance(digest, str)
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise VerificationValidationError("Verification output digest is invalid.")
+        return command_args
+
+    @classmethod
+    def _serialize_arguments(cls, value: object) -> str:
+        if not isinstance(value, tuple) or not value:
+            raise VerificationValidationError("Verification command arguments are invalid.")
+        if len(value) > 256:
+            raise VerificationValidationError("Verification command has too many arguments.")
+        if any(not isinstance(item, str) or "\x00" in item for item in value) or not value[0]:
+            raise VerificationValidationError("Verification command arguments are invalid.")
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized.encode("utf-8")) > 65_536:
+            raise VerificationValidationError("Verification command arguments are too large.")
+        return serialized
+
+    @classmethod
+    def _validate_integer(
+        cls,
+        value: object,
+        *,
+        field: str,
+        positive: bool,
+        nonnegative: bool = False,
+    ) -> int:
+        minimum = 0 if nonnegative else (1 if positive else -cls._maximum_integer)
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < minimum
+            or value > cls._maximum_integer
+        ):
+            raise VerificationValidationError(f"Verification {field} is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_text(value: object, *, field: str) -> str:
+        if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+            raise VerificationValidationError(f"Verification {field} is invalid.")
+        return value
+
+    @staticmethod
+    def _validate_timestamp(value: object) -> str:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise VerificationValidationError("Verification created_at is invalid.")
+        try:
+            parsed = datetime.fromisoformat(f"{value[:-1]}+00:00")
+        except ValueError as error:
+            raise VerificationValidationError("Verification created_at is invalid.") from error
+        if parsed <= datetime(1970, 1, 1, tzinfo=UTC):
+            raise VerificationValidationError("Verification created_at is invalid.")
+        return value
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> VerificationRecord:
+        try:
+            arguments = json.loads(row["command_args"])
+            if not isinstance(arguments, list):
+                raise ValueError
+            evidence = VerificationCreate(
+                job_id=row["job_id"],
+                command_args=tuple(arguments),
+                outcome=VerificationOutcome(row["outcome"]),
+                exit_code=row["exit_code"],
+                duration_ms=row["duration_ms"],
+                output_digest=row["output_digest"],
+                stdout_bytes=row["stdout_bytes"],
+                stderr_bytes=row["stderr_bytes"],
+            )
+            cls._validate_evidence(evidence)
+            return VerificationRecord(
+                id=cls._validate_integer(row["id"], field="id", positive=True),
+                job_id=evidence.job_id,
+                command_args=evidence.command_args,
+                outcome=evidence.outcome,
+                exit_code=evidence.exit_code,
+                duration_ms=evidence.duration_ms,
+                output_digest=evidence.output_digest,
+                stdout_bytes=evidence.stdout_bytes,
+                stderr_bytes=evidence.stderr_bytes,
+                created_at=cls._validate_timestamp(row["created_at"]),
+            )
+        except (
+            IndexError,
+            KeyError,
+            TypeError,
+            ValueError,
+            VerificationValidationError,
+        ) as error:
+            raise VerificationRepositoryError("Stored verification evidence is invalid.") from error
