@@ -205,6 +205,18 @@ class VerificationNotFoundError(VerificationRepositoryError):
     """Raised when requested verification evidence does not exist."""
 
 
+class ReviewBundleRepositoryError(DatabaseError):
+    """Base error for durable review bundle failures."""
+
+
+class ReviewBundleConflictError(ReviewBundleRepositoryError):
+    """Raised when a review bundle conflicts with committed evidence."""
+
+
+class ReviewBundleNotFoundError(ReviewBundleRepositoryError):
+    """Raised when a review bundle does not exist."""
+
+
 class RecoveryServiceError(DatabaseError):
     """Raised when durable restart state cannot be loaded safely."""
 
@@ -354,6 +366,15 @@ class VerificationRecord:
     output_digest: str
     stdout_bytes: int
     stderr_bytes: int
+    created_at: str
+
+
+@dataclass(frozen=True)
+class ReviewBundleRecord:
+    job_id: str
+    scan_event_id: int
+    payload: dict[str, Any]
+    payload_hash: str
     created_at: str
 
 
@@ -947,6 +968,44 @@ MIGRATIONS = (
             BEFORE DELETE ON verification_runs
             BEGIN
                 SELECT RAISE(ABORT, 'Verification evidence is immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=11,
+        name="create_review_bundles",
+        statements=(
+            """
+            CREATE TABLE review_bundles (
+                job_id TEXT PRIMARY KEY REFERENCES jobs(id) ON DELETE RESTRICT,
+                scan_event_id INTEGER NOT NULL UNIQUE
+                    REFERENCES events(id) ON DELETE RESTRICT,
+                payload TEXT NOT NULL CHECK (
+                    json_valid(payload)
+                    AND json_type(payload) = 'object'
+                    AND length(CAST(payload AS BLOB)) <= 2097152
+                ),
+                payload_hash TEXT NOT NULL CHECK (
+                    length(payload_hash) = 64
+                    AND payload_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """,
+            """
+            CREATE TRIGGER review_bundles_prevent_update
+            BEFORE UPDATE ON review_bundles
+            BEGIN
+                SELECT RAISE(ABORT, 'Review bundles are immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER review_bundles_prevent_delete
+            BEFORE DELETE ON review_bundles
+            BEGIN
+                SELECT RAISE(ABORT, 'Review bundles are immutable.');
             END
             """,
         ),
@@ -3766,3 +3825,136 @@ class VerificationRepository(_Repository):
             VerificationValidationError,
         ) as error:
             raise VerificationRepositoryError("Stored verification evidence is invalid.") from error
+
+
+class ReviewBundleRepository(_Repository):
+    """Store one immutable review snapshot per job."""
+
+    error_type = ReviewBundleRepositoryError
+    storage_name = "Review bundle"
+
+    def create(
+        self,
+        job: JobRecord,
+        scan_event: EventRecord,
+        payload: Mapping[str, Any],
+    ) -> ReviewBundleRecord:
+        if not isinstance(job, JobRecord) or not isinstance(scan_event, EventRecord):
+            raise ReviewBundleConflictError("Review bundle evidence is invalid.")
+        canonical, payload_hash = self._canonical_payload(payload)
+        if (
+            job.state is not JobState.REVIEW_READY
+            or scan_event.job_id != job.id
+            or scan_event.event_type != "job.review_ready"
+            or scan_event.payload.get("status") != "passed"
+            or payload.get("job_id") != job.id
+            or payload.get("scan_event_id") != scan_event.id
+            or payload.get("diff_digest") != scan_event.payload.get("scan_digest")
+        ):
+            raise ReviewBundleConflictError("Review bundle does not match review readiness.")
+        with self._write_connection() as connection:
+            try:
+                job_row = JobRepository._select_by_id(connection, job.id)
+                scan_row = EventRepository._select_by_id(connection, scan_event.id)
+                if (
+                    job_row is None
+                    or scan_row is None
+                    or JobRepository._to_record(job_row) != job
+                    or EventRepository._to_record(scan_row) != scan_event
+                ):
+                    raise ReviewBundleConflictError("Review evidence changed before snapshot.")
+                existing = self._select(connection, job.id)
+                if existing is not None:
+                    stored = self._to_record(existing)
+                    if stored.payload_hash != payload_hash or stored.scan_event_id != scan_event.id:
+                        raise ReviewBundleConflictError("Review bundle is already frozen.")
+                    return stored
+                connection.execute(
+                    """
+                    INSERT INTO review_bundles (job_id, scan_event_id, payload, payload_hash)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (job.id, scan_event.id, canonical, payload_hash),
+                )
+                row = self._select(connection, job.id)
+                if row is None:
+                    raise ReviewBundleRepositoryError("Review bundle could not be stored.")
+                return self._to_record(row)
+            except sqlite3.IntegrityError as error:
+                raise ReviewBundleRepositoryError("Review bundle could not be stored.") from error
+            except (JobRepositoryError, EventRepositoryError) as error:
+                raise ReviewBundleRepositoryError("Stored review evidence is invalid.") from error
+
+    def get(self, job_id: str) -> ReviewBundleRecord:
+        if (
+            not isinstance(job_id, str)
+            or not job_id
+            or job_id != job_id.strip()
+            or "\x00" in job_id
+        ):
+            raise ReviewBundleNotFoundError("Review bundle does not exist.")
+        with self._connection() as connection:
+            row = self._select(connection, job_id)
+        if row is None:
+            raise ReviewBundleNotFoundError("Review bundle does not exist.")
+        return self._to_record(row)
+
+    @staticmethod
+    def _select(connection: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT job_id, scan_event_id, payload, payload_hash, created_at
+            FROM review_bundles WHERE job_id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _canonical_payload(payload: object) -> tuple[str, str]:
+        if not isinstance(payload, Mapping):
+            raise ReviewBundleConflictError("Review bundle payload is invalid.")
+        try:
+            source = dict(payload)
+            canonical = json.dumps(
+                source, allow_nan=False, ensure_ascii=False, separators=(",", ":"), sort_keys=True
+            )
+            if json.loads(canonical) != source:
+                raise ValueError
+        except (RecursionError, TypeError, ValueError) as error:
+            raise ReviewBundleConflictError("Review bundle payload is invalid.") from error
+        if len(canonical.encode("utf-8")) > 2_097_152:
+            raise ReviewBundleConflictError("Review bundle exceeds the storage limit.")
+        return canonical, hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _to_record(cls, row: sqlite3.Row) -> ReviewBundleRecord:
+        try:
+            payload = json.loads(row["payload"])
+            if not isinstance(payload, dict):
+                raise ValueError
+            canonical, expected_hash = cls._canonical_payload(payload)
+            job_id = row["job_id"]
+            scan_event_id = row["scan_event_id"]
+            created_at = row["created_at"]
+            if (
+                not isinstance(job_id, str)
+                or not job_id
+                or not isinstance(scan_event_id, int)
+                or scan_event_id < 1
+                or payload.get("job_id") != job_id
+                or payload.get("scan_event_id") != scan_event_id
+                or row["payload"] != canonical
+                or row["payload_hash"] != expected_hash
+                or not isinstance(created_at, str)
+                or not created_at.endswith("Z")
+            ):
+                raise ValueError
+            return ReviewBundleRecord(
+                job_id=job_id,
+                scan_event_id=scan_event_id,
+                payload=payload,
+                payload_hash=expected_hash,
+                created_at=created_at,
+            )
+        except (KeyError, TypeError, ValueError, ReviewBundleConflictError) as error:
+            raise ReviewBundleRepositoryError("Stored review bundle is invalid.") from error

@@ -90,7 +90,7 @@ def test_version_nine_database_adds_verification_evidence_without_losing_jobs(
     expected_job = JobRepository(legacy).create(job(worktree))
 
     upgraded = Database(path)
-    assert upgraded.initialize() == LATEST_SCHEMA_VERSION == 10
+    assert upgraded.initialize() == LATEST_SCHEMA_VERSION == 11
     assert JobRepository(upgraded).get(expected_job.id) == expected_job
     with sqlite3.connect(path) as connection:
         objects = connection.execute(
