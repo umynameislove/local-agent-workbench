@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request
+from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
 from db import (
@@ -26,6 +26,7 @@ from db import (
     PlannerRepository,
     ProjectRepository,
     RecoveryService,
+    ReviewBundleRepository,
     UsageRepository,
     VerificationRepository,
 )
@@ -51,6 +52,12 @@ from planning import (
     PlanningNotFoundError,
     PlanningUnavailableError,
     ReadOnlyPlanningService,
+)
+from review_bundle import (
+    ReviewBundleMissingError,
+    ReviewBundleService,
+    ReviewBundleStateError,
+    ReviewBundleUnavailableError,
 )
 from secret_gate import (
     PreReviewSecretGate,
@@ -110,11 +117,18 @@ def create_app(
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
         app.state.verification_repository = VerificationRepository(database)
+        app.state.review_bundle_repository = ReviewBundleRepository(database)
         app.state.atomic_transition_service = AtomicTransitionService(database)
         app.state.secret_gate = PreReviewSecretGate(
             app.state.job_repository,
             app.state.event_repository,
             app.state.atomic_transition_service,
+        )
+        app.state.review_bundle_service = ReviewBundleService(
+            app.state.job_repository,
+            app.state.event_repository,
+            app.state.verification_repository,
+            app.state.review_bundle_repository,
         )
         app.state.planning_service = ReadOnlyPlanningService(
             app.state.job_repository,
@@ -295,6 +309,34 @@ def create_app(
         except SecretGateConflictError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except SecretGateUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.post("/api/jobs/{job_id}/review-bundle")
+    async def create_review_bundle(
+        request: Request, response: Response, job_id: str
+    ) -> dict[str, object]:
+        response.headers["Cache-Control"] = "no-store"
+        service: ReviewBundleService = request.app.state.review_bundle_service
+        try:
+            return await service.create(job_id)
+        except ReviewBundleMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ReviewBundleStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ReviewBundleUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.get("/api/jobs/{job_id}/review-bundle")
+    async def read_review_bundle(
+        request: Request, response: Response, job_id: str
+    ) -> dict[str, object]:
+        response.headers["Cache-Control"] = "no-store"
+        service: ReviewBundleService = request.app.state.review_bundle_service
+        try:
+            return service.read(job_id)
+        except ReviewBundleMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ReviewBundleUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
     return api
