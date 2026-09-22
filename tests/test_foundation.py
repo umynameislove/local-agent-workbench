@@ -33,6 +33,7 @@ from engine import (
     validate_consultant_advice,
 )
 from event_stream import EventStreamService
+from secret_gate import PreReviewSecretGate
 from verification import VerificationRunner
 from worktree import WorktreeManager
 
@@ -113,6 +114,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.memory_reference_repository, MemoryReferenceRepository)
         assert isinstance(api.state.verification_repository, VerificationRepository)
         assert isinstance(api.state.atomic_transition_service, AtomicTransitionService)
+        assert isinstance(api.state.secret_gate, PreReviewSecretGate)
         assert isinstance(api.state.worktree_manager, WorktreeManager)
         assert isinstance(api.state.verification_runner, VerificationRunner)
         assert isinstance(api.state.recovery_service, RecoveryService)
