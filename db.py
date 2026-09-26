@@ -9,7 +9,7 @@ import tempfile
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -147,6 +147,10 @@ class ApprovalPayloadMismatchError(ApprovalRepositoryError):
 
 class ApprovalDecisionConflictError(ApprovalRepositoryError):
     """Raised when a completed approval receives a conflicting retry."""
+
+
+class ApprovalWorkflowConflictError(ApprovalRepositoryError):
+    """Raised when a review decision conflicts with committed workflow state."""
 
 
 class PlannerRepositoryError(DatabaseError):
@@ -295,6 +299,12 @@ class ApprovalRecord:
     expires_at: datetime
     created_at: str
     decided_at: str | None
+
+
+@dataclass(frozen=True)
+class ApprovalWorkflowRecord:
+    approval: ApprovalRecord
+    event: EventRecord
 
 
 @dataclass(frozen=True)
@@ -994,6 +1004,53 @@ MIGRATIONS = (
                     DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
             )
             """,
+            """
+            CREATE TRIGGER review_bundles_prevent_update
+            BEFORE UPDATE ON review_bundles
+            BEGIN
+                SELECT RAISE(ABORT, 'Review bundles are immutable.');
+            END
+            """,
+            """
+            CREATE TRIGGER review_bundles_prevent_delete
+            BEFORE DELETE ON review_bundles
+            BEGIN
+                SELECT RAISE(ABORT, 'Review bundles are immutable.');
+            END
+            """,
+        ),
+    ),
+    Migration(
+        version=12,
+        name="version_review_bundles",
+        statements=(
+            "ALTER TABLE review_bundles RENAME TO review_bundles_v11",
+            """
+            CREATE TABLE review_bundles (
+                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+                scan_event_id INTEGER NOT NULL UNIQUE
+                    REFERENCES events(id) ON DELETE RESTRICT,
+                payload TEXT NOT NULL CHECK (
+                    json_valid(payload)
+                    AND json_type(payload) = 'object'
+                    AND length(CAST(payload AS BLOB)) <= 2097152
+                ),
+                payload_hash TEXT NOT NULL CHECK (
+                    length(payload_hash) = 64
+                    AND payload_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                created_at TEXT NOT NULL
+                    DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                PRIMARY KEY (job_id, scan_event_id)
+            )
+            """,
+            """
+            INSERT INTO review_bundles
+                (job_id, scan_event_id, payload, payload_hash, created_at)
+            SELECT job_id, scan_event_id, payload, payload_hash, created_at
+            FROM review_bundles_v11
+            """,
+            "DROP TABLE review_bundles_v11",
             """
             CREATE TRIGGER review_bundles_prevent_update
             BEFORE UPDATE ON review_bundles
@@ -3828,7 +3885,7 @@ class VerificationRepository(_Repository):
 
 
 class ReviewBundleRepository(_Repository):
-    """Store one immutable review snapshot per job."""
+    """Store one immutable snapshot per review round without replacing history."""
 
     error_type = ReviewBundleRepositoryError
     storage_name = "Review bundle"
@@ -3866,9 +3923,12 @@ class ReviewBundleRepository(_Repository):
                 existing = self._select(connection, job.id)
                 if existing is not None:
                     stored = self._to_record(existing)
-                    if stored.payload_hash != payload_hash or stored.scan_event_id != scan_event.id:
-                        raise ReviewBundleConflictError("Review bundle is already frozen.")
-                    return stored
+                    if stored.scan_event_id == scan_event.id:
+                        if stored.payload_hash != payload_hash:
+                            raise ReviewBundleConflictError("Review bundle is already frozen.")
+                        return stored
+                    if stored.scan_event_id > scan_event.id:
+                        raise ReviewBundleConflictError("Review readiness is stale.")
                 connection.execute(
                     """
                     INSERT INTO review_bundles (job_id, scan_event_id, payload, payload_hash)
@@ -3876,7 +3936,7 @@ class ReviewBundleRepository(_Repository):
                     """,
                     (job.id, scan_event.id, canonical, payload_hash),
                 )
-                row = self._select(connection, job.id)
+                row = self._select_by_event(connection, job.id, scan_event.id)
                 if row is None:
                     raise ReviewBundleRepositoryError("Review bundle could not be stored.")
                 return self._to_record(row)
@@ -3899,14 +3959,44 @@ class ReviewBundleRepository(_Repository):
             raise ReviewBundleNotFoundError("Review bundle does not exist.")
         return self._to_record(row)
 
+    def get_for_event(self, job_id: str, scan_event_id: int) -> ReviewBundleRecord:
+        if (
+            not isinstance(job_id, str)
+            or not job_id
+            or job_id != job_id.strip()
+            or "\x00" in job_id
+            or not isinstance(scan_event_id, int)
+            or isinstance(scan_event_id, bool)
+            or scan_event_id < 1
+        ):
+            raise ReviewBundleNotFoundError("Review bundle does not exist.")
+        with self._connection() as connection:
+            row = self._select_by_event(connection, job_id, scan_event_id)
+        if row is None:
+            raise ReviewBundleNotFoundError("Review bundle does not exist.")
+        return self._to_record(row)
+
     @staticmethod
     def _select(connection: sqlite3.Connection, job_id: str) -> sqlite3.Row | None:
         return connection.execute(
             """
             SELECT job_id, scan_event_id, payload, payload_hash, created_at
             FROM review_bundles WHERE job_id = ?
+            ORDER BY scan_event_id DESC LIMIT 1
             """,
             (job_id,),
+        ).fetchone()
+
+    @staticmethod
+    def _select_by_event(
+        connection: sqlite3.Connection, job_id: str, scan_event_id: int
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """
+            SELECT job_id, scan_event_id, payload, payload_hash, created_at
+            FROM review_bundles WHERE job_id = ? AND scan_event_id = ?
+            """,
+            (job_id, scan_event_id),
         ).fetchone()
 
     @staticmethod
@@ -3958,3 +4048,288 @@ class ReviewBundleRepository(_Repository):
             )
         except (KeyError, TypeError, ValueError, ReviewBundleConflictError) as error:
             raise ReviewBundleRepositoryError("Stored review bundle is invalid.") from error
+
+
+class ApprovalWorkflowRepository(_Repository):
+    """Commit approval, job state and audit event in one SQLite transaction."""
+
+    error_type = ApprovalRepositoryError
+    storage_name = "Approval workflow"
+
+    def __init__(self, database: Database, *, clock: Callable[[], datetime] | None = None) -> None:
+        super().__init__(database)
+        self._approvals = ApprovalRepository(database, clock=clock)
+
+    def request(
+        self,
+        approval: ApprovalCreate,
+        expected_job: JobRecord,
+        expected_bundle: ReviewBundleRecord,
+    ) -> ApprovalWorkflowRecord:
+        payload_hash, expires_at_us = ApprovalRepository._validate_approval(approval)
+        if (
+            approval.job_id != expected_job.id
+            or expected_bundle.job_id != expected_job.id
+            or dict(approval.payload)
+            != {
+                "job_id": expected_job.id,
+                "scan_event_id": expected_bundle.scan_event_id,
+                "bundle_hash": expected_bundle.payload_hash,
+            }
+        ):
+            raise ApprovalValidationError("Approval review identity is invalid.")
+        event = EventCreate(
+            approval.job_id,
+            "approval.requested",
+            {
+                "approval_id": approval.id,
+                "bundle_hash": expected_bundle.payload_hash,
+                "scan_event_id": expected_bundle.scan_event_id,
+                "expires_at": ApprovalRepository._format_timestamp(approval.expires_at),
+            },
+            f"approval.requested:{approval.id}",
+        )
+        event_data = EventRepository._validate_event(event)
+        with self._write_connection() as connection:
+            current_job = self._assert_snapshot(
+                connection, expected_job, expected_bundle, allow_waiting_retry=True
+            )
+            now, now_us = self._approvals._read_clock()
+            pending_rows = connection.execute(
+                """
+                SELECT id, job_id, payload_hash, decision, actor, channel,
+                       expires_at, created_at, decided_at
+                FROM approvals WHERE job_id = ? AND decision IS NULL
+                """,
+                (approval.job_id,),
+            ).fetchall()
+            if current_job.state is JobState.WAITING_APPROVAL:
+                if len(pending_rows) != 1:
+                    raise ApprovalWorkflowConflictError("Pending approval state is inconsistent.")
+                pending = ApprovalRepository._to_record(pending_rows[0])
+                if pending.payload_hash != payload_hash:
+                    raise ApprovalWorkflowConflictError("A different review is awaiting approval.")
+                if pending.expires_at <= now:
+                    raise ApprovalExpiredError("Approval has expired.")
+                requested = self._request_event(connection, approval.job_id, pending.id)
+                if requested.payload != {
+                    "approval_id": pending.id,
+                    "bundle_hash": expected_bundle.payload_hash,
+                    "scan_event_id": expected_bundle.scan_event_id,
+                    "expires_at": ApprovalRepository._format_timestamp(pending.expires_at),
+                }:
+                    raise ApprovalWorkflowConflictError("Approval review binding is invalid.")
+                return ApprovalWorkflowRecord(pending, requested)
+            if current_job.state is not JobState.REVIEW_READY or pending_rows:
+                raise ApprovalWorkflowConflictError("Job is not ready to request approval.")
+            if expires_at_us <= now_us:
+                raise ApprovalExpiredError("Approval expiry must be in the future.")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO approvals (id, job_id, payload_hash, expires_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (approval.id, approval.job_id, payload_hash, expires_at_us),
+                )
+                update = JobUpdate(
+                    expected_job.id,
+                    JobState.WAITING_APPROVAL,
+                    expected_job.runtime,
+                    expected_job.model,
+                    expected_job.worktree_path,
+                )
+                validate_job_transition(expected_job.state, update.state)
+                JobRepository._update(connection, update)
+                stored_event = EventRepository._append(connection, event, *event_data)
+                row = ApprovalRepository._select_by_id(connection, approval.id)
+                if row is None:
+                    raise ApprovalRepositoryError("Approval could not be created.")
+                return ApprovalWorkflowRecord(ApprovalRepository._to_record(row), stored_event)
+            except (sqlite3.IntegrityError, ForbiddenJobTransitionError) as error:
+                raise ApprovalRepositoryError("Approval request could not be recorded.") from error
+
+    def get_request_event(self, approval_id: str, job_id: str) -> EventRecord:
+        ApprovalRepository._validate_text(approval_id, field="id", maximum_bytes=128)
+        ApprovalRepository._validate_text(job_id, field="job_id")
+        with self._connection() as connection:
+            return self._request_event(connection, job_id, approval_id)
+
+    def resolve(
+        self,
+        approval_id: str,
+        resolution: ApprovalResolution,
+        expected_job: JobRecord | None = None,
+        expected_bundle: ReviewBundleRecord | None = None,
+    ) -> ApprovalWorkflowRecord:
+        normalized_id = ApprovalRepository._validate_text(
+            approval_id, field="id", maximum_bytes=128
+        )
+        payload_hash = ApprovalRepository._validate_resolution(resolution)
+        with self._write_connection() as connection:
+            row = ApprovalRepository._select_by_id(connection, normalized_id)
+            if row is None:
+                raise ApprovalNotFoundError("Approval does not exist.")
+            stored = ApprovalRepository._to_record(row)
+            if stored.payload_hash != payload_hash:
+                raise ApprovalPayloadMismatchError("Approval review binding does not match.")
+            requested = self._request_event(connection, stored.job_id, normalized_id)
+            if stored.decision is not None:
+                if (
+                    stored.decision != resolution.decision
+                    or stored.actor != resolution.actor
+                    or stored.channel != resolution.channel
+                ):
+                    raise ApprovalDecisionConflictError("Approval already has another decision.")
+                decided = self._decision_event(connection, stored.job_id, normalized_id)
+                target = {
+                    ApprovalDecision.APPROVED: JobState.APPROVED,
+                    ApprovalDecision.REJECTED: JobState.REJECTED,
+                    ApprovalDecision.CHANGES_REQUESTED: JobState.RUNNING,
+                }[stored.decision]
+                if decided.payload != {
+                    "approval_id": normalized_id,
+                    "decision": stored.decision.value,
+                    "bundle_hash": requested.payload.get("bundle_hash"),
+                    "job_state": target.value,
+                    "channel": stored.channel,
+                }:
+                    raise ApprovalWorkflowConflictError("Approval decision event is inconsistent.")
+                return ApprovalWorkflowRecord(stored, decided)
+            if expected_job is None or expected_bundle is None:
+                raise ApprovalWorkflowConflictError("Live review evidence is required.")
+            self._assert_snapshot(connection, expected_job, expected_bundle)
+            if (
+                expected_job.id != stored.job_id
+                or expected_job.state is not JobState.WAITING_APPROVAL
+                or requested.payload.get("bundle_hash") != expected_bundle.payload_hash
+                or requested.payload.get("scan_event_id") != expected_bundle.scan_event_id
+            ):
+                raise ApprovalWorkflowConflictError("Approval review state changed.")
+            pending_count = connection.execute(
+                "SELECT COUNT(*) FROM approvals WHERE job_id = ? AND decision IS NULL",
+                (stored.job_id,),
+            ).fetchone()[0]
+            if pending_count != 1:
+                raise ApprovalWorkflowConflictError("Pending approval state is inconsistent.")
+            now, now_us = self._approvals._read_clock()
+            if now_us >= ApprovalRepository._datetime_to_epoch_us(stored.expires_at):
+                raise ApprovalExpiredError("Approval has expired.")
+            target = {
+                ApprovalDecision.APPROVED: JobState.APPROVED,
+                ApprovalDecision.REJECTED: JobState.REJECTED,
+                ApprovalDecision.CHANGES_REQUESTED: JobState.RUNNING,
+            }[resolution.decision]
+            update = JobUpdate(
+                stored.job_id,
+                target,
+                expected_job.runtime,
+                expected_job.model,
+                expected_job.worktree_path,
+            )
+            event = EventCreate(
+                stored.job_id,
+                "approval.decided",
+                {
+                    "approval_id": normalized_id,
+                    "decision": resolution.decision.value,
+                    "bundle_hash": expected_bundle.payload_hash,
+                    "job_state": target.value,
+                    "channel": resolution.channel,
+                },
+                f"approval.decided:{normalized_id}",
+            )
+            event_data = EventRepository._validate_event(event)
+            try:
+                validate_job_transition(expected_job.state, target)
+                result = connection.execute(
+                    """
+                    UPDATE approvals
+                    SET decision = ?, actor = ?, channel = ?, decided_at = ?
+                    WHERE id = ? AND decision IS NULL
+                    """,
+                    (
+                        resolution.decision.value,
+                        resolution.actor,
+                        resolution.channel,
+                        ApprovalRepository._format_timestamp(now),
+                        normalized_id,
+                    ),
+                )
+                if result.rowcount != 1:
+                    raise ApprovalDecisionConflictError("Approval decision was not recorded.")
+                JobRepository._update(connection, update)
+                decided = EventRepository._append(connection, event, *event_data)
+                row = ApprovalRepository._select_by_id(connection, normalized_id)
+                if row is None:
+                    raise ApprovalRepositoryError("Approval decision was not recorded.")
+                return ApprovalWorkflowRecord(ApprovalRepository._to_record(row), decided)
+            except (sqlite3.IntegrityError, ForbiddenJobTransitionError) as error:
+                raise ApprovalRepositoryError("Approval decision could not be recorded.") from error
+
+    @staticmethod
+    def _assert_snapshot(
+        connection: sqlite3.Connection,
+        expected_job: JobRecord,
+        expected_bundle: ReviewBundleRecord,
+        *,
+        allow_waiting_retry: bool = False,
+    ) -> JobRecord:
+        job_row = JobRepository._select_by_id(connection, expected_job.id)
+        bundle_row = ReviewBundleRepository._select(connection, expected_job.id)
+        if job_row is None or bundle_row is None:
+            raise ApprovalWorkflowConflictError("Review evidence changed before approval.")
+        stored_job = JobRepository._to_record(job_row)
+        if ReviewBundleRepository._to_record(bundle_row) != expected_bundle:
+            raise ApprovalWorkflowConflictError("Review evidence changed before approval.")
+        latest_readiness = connection.execute(
+            """
+            SELECT id FROM events
+            WHERE job_id = ? AND event_type = 'job.review_ready'
+            ORDER BY sequence DESC LIMIT 1
+            """,
+            (expected_job.id,),
+        ).fetchone()
+        if latest_readiness is None or latest_readiness["id"] != expected_bundle.scan_event_id:
+            raise ApprovalWorkflowConflictError("Review bundle is not the latest review round.")
+        if stored_job != expected_job and not (
+            allow_waiting_retry
+            and expected_job.state is JobState.REVIEW_READY
+            and stored_job.state is JobState.WAITING_APPROVAL
+            and replace(
+                stored_job,
+                state=expected_job.state,
+                updated_at=expected_job.updated_at,
+            )
+            == expected_job
+        ):
+            raise ApprovalWorkflowConflictError("Review evidence changed before approval.")
+        return stored_job
+
+    @staticmethod
+    def _request_event(
+        connection: sqlite3.Connection, job_id: str, approval_id: str
+    ) -> EventRecord:
+        row = EventRepository._select_by_idempotency_key(
+            connection, job_id, f"approval.requested:{approval_id}"
+        )
+        if row is None:
+            raise ApprovalWorkflowConflictError("Approval request event is missing.")
+        event = EventRepository._to_record(row)
+        if event.event_type != "approval.requested":
+            raise ApprovalWorkflowConflictError("Approval request event is invalid.")
+        return event
+
+    @staticmethod
+    def _decision_event(
+        connection: sqlite3.Connection, job_id: str, approval_id: str
+    ) -> EventRecord:
+        row = EventRepository._select_by_idempotency_key(
+            connection, job_id, f"approval.decided:{approval_id}"
+        )
+        if row is None:
+            raise ApprovalWorkflowConflictError("Approval decision event is missing.")
+        event = EventRepository._to_record(row)
+        if event.event_type != "approval.decided":
+            raise ApprovalWorkflowConflictError("Approval decision event is invalid.")
+        return event

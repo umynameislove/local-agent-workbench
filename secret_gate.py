@@ -337,6 +337,18 @@ class PreReviewSecretGate:
         job: JobRecord,
         scan: SecretScanResult,
     ) -> AtomicTransitionRecord:
+        try:
+            history = self._events.list(job.id)
+        except EventRepositoryError as error:
+            raise SecretGateUnavailableError("Review readiness history is unavailable.") from error
+        if job.state is JobState.REVIEW_READY:
+            latest = next(
+                (event for event in reversed(history) if event.event_type == "job.review_ready"),
+                None,
+            )
+            if latest is not None and latest.payload.get("scan_digest") == scan.digest:
+                return AtomicTransitionRecord(job=job, event=latest)
+            raise SecretGateConflictError("Review ready content changed after scanning.")
         update = JobUpdate(
             id=job.id,
             state=JobState.REVIEW_READY,
@@ -348,7 +360,7 @@ class PreReviewSecretGate:
             job_id=job.id,
             event_type="job.review_ready",
             payload=scan.event_payload(),
-            idempotency_key=f"secret-scan-passed:{scan.digest}",
+            idempotency_key=f"secret-scan-passed:{scan.digest}:{history[-1].id if history else 0}",
         )
         try:
             return self._transitions.transition(update, event)
