@@ -136,7 +136,7 @@ def test_schema_ten_upgrade_adds_immutable_review_storage(tmp_path: Path) -> Non
     JobRepository(legacy).create(job(worktree, base))
 
     upgraded = Database(path)
-    assert upgraded.initialize() == LATEST_SCHEMA_VERSION == 11
+    assert upgraded.initialize() == LATEST_SCHEMA_VERSION == 12
     assert JobRepository(upgraded).get("job-001").request_snapshot["repo_head"] == base
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)

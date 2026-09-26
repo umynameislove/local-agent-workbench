@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
@@ -10,8 +11,16 @@ from typing import Annotated
 from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 
+from approval_service import (
+    ApprovalInputError,
+    ApprovalMissingError,
+    ApprovalService,
+    ApprovalStateError,
+    ApprovalUnavailableError,
+)
 from db import (
     ApprovalRepository,
+    ApprovalWorkflowRepository,
     AtomicTransitionService,
     BackupService,
     BackupServiceError,
@@ -113,6 +122,7 @@ def create_app(
             app.state.event_repository,
         )
         app.state.approval_repository = ApprovalRepository(database)
+        app.state.approval_workflow_repository = ApprovalWorkflowRepository(database)
         app.state.planner_repository = PlannerRepository(database)
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
@@ -129,6 +139,12 @@ def create_app(
             app.state.event_repository,
             app.state.verification_repository,
             app.state.review_bundle_repository,
+        )
+        app.state.approval_service = ApprovalService(
+            app.state.job_repository,
+            app.state.approval_repository,
+            app.state.review_bundle_repository,
+            app.state.approval_workflow_repository,
         )
         app.state.planning_service = ReadOnlyPlanningService(
             app.state.job_repository,
@@ -339,7 +355,63 @@ def create_app(
         except ReviewBundleUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
+    @api.post("/api/jobs/{job_id}/approval-request")
+    async def request_approval(
+        request: Request,
+        response: Response,
+        job_id: str,
+        payload: Annotated[object, Body()],
+    ) -> dict[str, object]:
+        _check_approval_origin(request)
+        response.headers["Cache-Control"] = "no-store"
+        service: ApprovalService = request.app.state.approval_service
+        try:
+            return await service.request(job_id, payload)
+        except ApprovalInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ApprovalMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ApprovalStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ApprovalUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.post("/api/approvals/{approval_id}")
+    async def decide_approval(
+        request: Request,
+        response: Response,
+        approval_id: str,
+        payload: Annotated[object, Body()],
+    ) -> dict[str, object]:
+        _check_approval_origin(request)
+        response.headers["Cache-Control"] = "no-store"
+        service: ApprovalService = request.app.state.approval_service
+        try:
+            return await service.decide(approval_id, payload)
+        except ApprovalInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ApprovalMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ApprovalStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ApprovalUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
     return api
+
+
+def _check_approval_origin(request: Request) -> None:
+    if request.url.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        raise HTTPException(status_code=403, detail="Approvals require a local host.")
+    try:
+        client = ipaddress.ip_address(request.client.host) if request.client else None
+    except ValueError:
+        client = None
+    if client is None or not client.is_loopback:
+        raise HTTPException(status_code=403, detail="Approvals require a local client.")
+    origin = request.headers.get("origin")
+    if origin is not None and origin != f"{request.url.scheme}://{request.headers.get('host')}":
+        raise HTTPException(status_code=403, detail="Cross origin approvals are not allowed.")
 
 
 app = create_app()

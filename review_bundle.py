@@ -47,7 +47,7 @@ class ReviewBundleUnavailableError(ReviewBundleError):
 
 
 class ReviewBundleService:
-    """Freeze the exact reviewed diff and verification evidence once per job."""
+    """Freeze the exact reviewed diff and evidence once per review round."""
 
     def __init__(
         self,
