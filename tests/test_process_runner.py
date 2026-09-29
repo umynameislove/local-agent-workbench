@@ -39,6 +39,22 @@ def test_stdin_is_closed(tmp_path: Path):
     assert result.stdout == b"0\n"
 
 
+def test_explicit_bytes_are_sent_only_to_child_stdin(tmp_path: Path):
+    result = asyncio.run(
+        run_process(
+            (sys.executable, "-c", "import sys; sys.stdout.buffer.write(sys.stdin.buffer.read())"),
+            cwd=tmp_path,
+            input_bytes=b"approved patch\n",
+        )
+    )
+    assert result.stdout == b"approved patch\n"
+
+
+def test_non_bytes_process_input_is_rejected(tmp_path: Path):
+    with pytest.raises(ValueError, match="input"):
+        asyncio.run(run_process((sys.executable,), cwd=tmp_path, input_bytes="not bytes"))
+
+
 def test_explicit_environment_is_used_without_inheriting_secret_values(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

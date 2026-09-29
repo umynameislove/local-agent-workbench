@@ -105,6 +105,22 @@ def test_transition_updates_job_and_appends_event_in_one_result(tmp_path: Path) 
     assert events.list("job-001") == (result.event,)
 
 
+def test_expected_job_prevents_stale_transition_without_new_event(tmp_path: Path) -> None:
+    _, service, jobs, events = initialized_service(tmp_path)
+    original = jobs.get("job-001")
+    first = service.transition(update(), event(), expected_job=original)
+
+    with pytest.raises(AtomicTransitionConflictError, match="changed"):
+        service.transition(
+            update(state=JobState.PLANNING),
+            event(event_type="job.planning", idempotency_key=None),
+            expected_job=original,
+        )
+
+    assert jobs.get("job-001") == first.job
+    assert events.list("job-001") == (first.event,)
+
+
 def test_event_failure_rolls_back_job_update(tmp_path: Path) -> None:
     database, service, jobs, events = initialized_service(tmp_path)
     original = jobs.get("job-001")

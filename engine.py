@@ -50,6 +50,7 @@ async def run_process(
     cwd: Path,
     env: Mapping[str, str] | None = None,
     timeout: float = 60.0,
+    input_bytes: bytes | None = None,
 ) -> ProcessResult:
     """Run structured arguments on POSIX and reap the process group on cancellation.
 
@@ -82,6 +83,8 @@ async def run_process(
         raise ValueError("Process environment must contain valid string entries.")
     if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("Process timeout must be finite and positive.")
+    if input_bytes is not None and not isinstance(input_bytes, bytes):
+        raise ValueError("Process input must be bytes.")
 
     async def reap(process: asyncio.subprocess.Process) -> None:
         with suppress(ProcessLookupError):
@@ -101,7 +104,9 @@ async def run_process(
             *argv,
             cwd=cwd,
             env=None if env is None else dict(env),
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE
+            if input_bytes is not None
+            else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             start_new_session=True,
@@ -119,7 +124,7 @@ async def run_process(
     except OSError:
         raise ProcessRunnerError("Process could not be started.") from None
 
-    communication = asyncio.create_task(process.communicate())
+    communication = asyncio.create_task(process.communicate(input_bytes))
     try:
         stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout)
         return ProcessResult(process.returncode, stdout, stderr)

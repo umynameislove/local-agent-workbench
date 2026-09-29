@@ -2198,6 +2198,8 @@ class AtomicTransitionService(_Repository):
         self,
         job: JobUpdate,
         event: EventCreate,
+        *,
+        expected_job: JobRecord | None = None,
     ) -> AtomicTransitionRecord:
         try:
             JobRepository._validate_update(job)
@@ -2225,6 +2227,8 @@ class AtomicTransitionService(_Repository):
                 if row is None:
                     raise JobNotFoundError("Job does not exist.")
                 current_job = JobRepository._to_record(row)
+                if expected_job is not None and current_job != expected_job:
+                    raise AtomicTransitionConflictError("Job changed before atomic transition.")
                 validate_job_transition(current_job.state, job.state)
                 stored_job = JobRepository._update(connection, job)
                 stored_event = EventRepository._append(
@@ -4154,6 +4158,12 @@ class ApprovalWorkflowRepository(_Repository):
         ApprovalRepository._validate_text(job_id, field="job_id")
         with self._connection() as connection:
             return self._request_event(connection, job_id, approval_id)
+
+    def get_decision_event(self, approval_id: str, job_id: str) -> EventRecord:
+        ApprovalRepository._validate_text(approval_id, field="id", maximum_bytes=128)
+        ApprovalRepository._validate_text(job_id, field="job_id")
+        with self._connection() as connection:
+            return self._decision_event(connection, job_id, approval_id)
 
     def resolve(
         self,
