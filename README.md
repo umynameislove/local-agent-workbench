@@ -163,6 +163,10 @@ The destination parent must already exist. Each backup requires a new filename o
 
 Backups contain private application data. Store them in a protected local directory. The snapshot covers SQLite records only; configuration, credentials, worktree files and external `projmem` content require separate backups. Recovery must be tested in an isolated runtime before replacing live data.
 
+## Local promotion
+
+After approval, submit `{"bundle_hash":"..."}` to `POST /api/approvals/{id}/promote` from a loopback client. The service rechecks the approved worktree and frozen text diff, verifies that the original project checkout is clean and at the submitted commit, then applies the reviewed patch locally. It records `applying` before any target write and `completed` only after the changed path set and final file contents match the approved worktree. An interrupted or partial application remains `applying` for manual reconciliation and is never retried automatically. Promotion does not stage, commit, push or deploy.
+
 ## Cost boundary
 
 1. Claude Code and Codex: user's existing native subscriptions.
