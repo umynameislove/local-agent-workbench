@@ -123,6 +123,22 @@ class WorktreeManager:
         async with lock:
             return await self._create_locked(job_id)
 
+    async def verify_bound(self, job: JobRecord) -> Path:
+        """Verify the job still owns its deterministic linked worktree."""
+
+        contract = self._contract(job)
+        storage = self._resolve_directory(
+            self._worktrees_root, unavailable="Worktree storage is unavailable."
+        )
+        project = self._resolve_directory(
+            contract.project_root, conflict="Project repository is unavailable."
+        )
+        target = storage / contract.key
+        if self._overlaps(project, storage) or job.worktree_path != str(target):
+            raise WorktreeConflictError("Job worktree binding is invalid.")
+        await self._verify_repository(project, contract.base_commit)
+        return await self._verify_worktree(project, target, contract)
+
     async def _create_locked(self, job_id: str) -> WorktreeBlock:
         job = self._load_job(job_id)
         contract = self._contract(job)

@@ -84,7 +84,7 @@ class ApprovalService:
         bundle = self._bundle(job.id)
         if viewed_hash != bundle.payload_hash:
             raise ApprovalStateError("Displayed review bundle is no longer current.")
-        await self._assert_live(job, bundle)
+        await self.assert_live(job, bundle)
         payload = self._binding(job.id, bundle.scan_event_id, bundle.payload_hash)
         now = self._clock()
         try:
@@ -140,7 +140,7 @@ class ApprovalService:
                 or expected_bundle.scan_event_id != binding["scan_event_id"]
             ):
                 raise ApprovalStateError("Review changed while approval was pending.")
-            await self._assert_live(expected_job, expected_bundle)
+            await self.assert_live(expected_job, expected_bundle)
         resolution = ApprovalResolution(
             decision=decision,
             actor=actor,
@@ -178,7 +178,8 @@ class ApprovalService:
         except DatabaseError as error:
             raise ApprovalUnavailableError("Review bundle is unavailable.") from error
 
-    async def _assert_live(self, job: JobRecord, bundle: ReviewBundleRecord) -> None:
+    async def assert_live(self, job: JobRecord, bundle: ReviewBundleRecord) -> None:
+        """Verify the frozen review still describes the exact live worktree."""
         base = job.request_snapshot.get("repo_head")
         if job.worktree_path is None or not isinstance(base, str) or not valid_object_id(base):
             raise ApprovalStateError("Job worktree snapshot is invalid.")

@@ -139,6 +139,20 @@ class ReadOnlyDiffService:
             truncated=truncated,
         )
 
+    async def porcelain_status(self) -> bytes:
+        """Read stable index and worktree status with unsafe Git filters disabled."""
+
+        await self._verify_repository()
+        configuration = await self._load_filter_arguments()
+        before = await self._status()
+        if await self._load_filter_arguments() != configuration:
+            raise DiffConflictError("Git configuration changed during status inspection.")
+        await self._verify_repository()
+        after = await self._status()
+        if before != after:
+            raise DiffConflictError("Worktree changed during status inspection.")
+        return after
+
     async def _verify_repository(self) -> None:
         try:
             self._boundary.verify()

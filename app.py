@@ -62,6 +62,14 @@ from planning import (
     PlanningUnavailableError,
     ReadOnlyPlanningService,
 )
+from promotion import (
+    PromotionConflictError,
+    PromotionInputError,
+    PromotionMissingError,
+    PromotionReconciliationError,
+    PromotionService,
+    PromotionUnavailableError,
+)
 from review_bundle import (
     ReviewBundleMissingError,
     ReviewBundleService,
@@ -156,6 +164,17 @@ def create_app(
             app.state.event_repository,
             app.state.atomic_transition_service,
             runtime.worktrees,
+        )
+        app.state.promotion_service = PromotionService(
+            app.state.project_repository,
+            app.state.job_repository,
+            app.state.approval_repository,
+            app.state.approval_workflow_repository,
+            app.state.review_bundle_repository,
+            app.state.atomic_transition_service,
+            app.state.worktree_manager,
+            app.state.approval_service,
+            runtime.cache,
         )
         app.state.verification_runner = VerificationRunner(
             app.state.job_repository,
@@ -395,6 +414,27 @@ def create_app(
         except ApprovalStateError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ApprovalUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.post("/api/approvals/{approval_id}/promote")
+    async def promote_approval(
+        request: Request,
+        response: Response,
+        approval_id: str,
+        payload: Annotated[object, Body()],
+    ) -> dict[str, object]:
+        _check_approval_origin(request)
+        response.headers["Cache-Control"] = "no-store"
+        service: PromotionService = request.app.state.promotion_service
+        try:
+            return await service.promote(approval_id, payload)
+        except PromotionInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except PromotionMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except (PromotionConflictError, PromotionReconciliationError) as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except PromotionUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
     return api
