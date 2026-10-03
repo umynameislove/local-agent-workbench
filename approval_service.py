@@ -32,6 +32,7 @@ from diff_service import DiffServiceError, ReadOnlyDiffService
 from diff_types import valid_object_id
 from engine import ApprovalCreate, ApprovalDecision, ApprovalResolution, JobState
 from secret_gate import SecretScanner
+from worktree import WorktreeError, worktree_identity
 
 
 class ApprovalServiceError(RuntimeError):
@@ -131,6 +132,7 @@ class ApprovalService:
             raise ApprovalStateError("Displayed review bundle does not match approval.")
         expected_job: JobRecord | None = None
         expected_bundle: ReviewBundleRecord | None = None
+        retained_identity: dict[str, int | str] | None = None
         if approval.decision is None:
             expected_job = self._job(approval.job_id)
             expected_bundle = self._bundle(approval.job_id)
@@ -141,6 +143,13 @@ class ApprovalService:
             ):
                 raise ApprovalStateError("Review changed while approval was pending.")
             await self.assert_live(expected_job, expected_bundle)
+            if decision is ApprovalDecision.REJECTED:
+                try:
+                    retained_identity = worktree_identity(Path(expected_job.worktree_path or ""))
+                except WorktreeError as error:
+                    raise ApprovalUnavailableError(
+                        "Rejected worktree cannot be retained safely."
+                    ) from error
         resolution = ApprovalResolution(
             decision=decision,
             actor=actor,
@@ -148,7 +157,13 @@ class ApprovalService:
             payload=binding,
         )
         try:
-            result = self._workflow.resolve(approval_id, resolution, expected_job, expected_bundle)
+            result = self._workflow.resolve(
+                approval_id,
+                resolution,
+                expected_job,
+                expected_bundle,
+                retained_identity=retained_identity,
+            )
         except (
             ApprovalDecisionConflictError,
             ApprovalExpiredError,

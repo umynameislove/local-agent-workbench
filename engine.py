@@ -1141,11 +1141,30 @@ class ConsultantConfig:
 
 
 @dataclass(frozen=True)
+class RetentionConfig:
+    rejected_worktree_days: int = 7
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.rejected_worktree_days) is not int
+            or not 1 <= self.rejected_worktree_days <= 365
+        ):
+            raise ConfigurationError("Rejected worktree retention must be 1 to 365 whole days.")
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> RetentionConfig:
+        if not isinstance(value, Mapping) or set(value) - {"rejected_worktree_days"}:
+            raise ConfigurationError("Retention configuration fields are invalid.")
+        return cls(rejected_worktree_days=value.get("rejected_worktree_days", 7))
+
+
+@dataclass(frozen=True)
 class WorkbenchConfig:
     version: int
     projects: tuple[ProjectConfig, ...]
     providers: Mapping[str, bool]
     consultant: ConsultantConfig
+    retention: RetentionConfig = RetentionConfig()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WorkbenchConfig:
@@ -1176,6 +1195,7 @@ class WorkbenchConfig:
             projects=projects,
             providers=normalized_providers,
             consultant=ConsultantConfig.from_dict(value.get("consultant", {})),
+            retention=RetentionConfig.from_dict(value.get("retention", {})),
         )
 
     @classmethod
@@ -1194,16 +1214,24 @@ class WorkbenchConfig:
         return cls.from_dict(value)
 
 
-async def load_configured_projects(path: Path) -> tuple[ProjectConfig, ...]:
-    """Load configured projects and require each path to be an exact Git root."""
-
+def load_optional_config(path: Path) -> WorkbenchConfig | None:
+    """Read one configuration snapshot, preserving the no configuration mode."""
     try:
         path.lstat()
     except FileNotFoundError:
-        return ()
+        return None
     except OSError:
         raise ConfigurationError("Configuration file could not be inspected.") from None
-    config = WorkbenchConfig.load(path)
+    return WorkbenchConfig.load(path)
+
+
+async def load_configured_projects(
+    path: Path, *, config: WorkbenchConfig | None = None
+) -> tuple[ProjectConfig, ...]:
+    """Load configured projects and require each path to be an exact Git root."""
+    config = config if config is not None else load_optional_config(path)
+    if config is None:
+        return ()
     try:
         base = path.parent.resolve(strict=True)
     except (OSError, RuntimeError):

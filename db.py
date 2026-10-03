@@ -33,6 +33,7 @@ from engine import (
     ProjectConfig,
     RecoveryAction,
     RecoveryIssue,
+    RetentionConfig,
     Sensitivity,
     UsageCreate,
     VerificationCreate,
@@ -4060,9 +4061,18 @@ class ApprovalWorkflowRepository(_Repository):
     error_type = ApprovalRepositoryError
     storage_name = "Approval workflow"
 
-    def __init__(self, database: Database, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        retention: RetentionConfig | None = None,
+    ) -> None:
         super().__init__(database)
         self._approvals = ApprovalRepository(database, clock=clock)
+        self._retention = RetentionConfig() if retention is None else retention
+        if not isinstance(self._retention, RetentionConfig):
+            raise TypeError("Approval retention must use RetentionConfig.")
 
     def request(
         self,
@@ -4171,6 +4181,8 @@ class ApprovalWorkflowRepository(_Repository):
         resolution: ApprovalResolution,
         expected_job: JobRecord | None = None,
         expected_bundle: ReviewBundleRecord | None = None,
+        *,
+        retained_identity: Mapping[str, int | str] | None = None,
     ) -> ApprovalWorkflowRecord:
         normalized_id = ApprovalRepository._validate_text(
             approval_id, field="id", maximum_bytes=128
@@ -4269,6 +4281,28 @@ class ApprovalWorkflowRepository(_Repository):
                 if result.rowcount != 1:
                     raise ApprovalDecisionConflictError("Approval decision was not recorded.")
                 JobRepository._update(connection, update)
+                if resolution.decision is ApprovalDecision.REJECTED:
+                    try:
+                        retain_until = now + timedelta(days=self._retention.rejected_worktree_days)
+                    except OverflowError as error:
+                        raise ApprovalValidationError("Retention deadline is invalid.") from error
+                    retained = EventCreate(
+                        stored.job_id,
+                        "job.worktree.retained",
+                        {
+                            "approval_id": stored.id,
+                            "bundle_hash": expected_bundle.payload_hash,
+                            "retention_days": self._retention.rejected_worktree_days,
+                            "retain_until": ApprovalRepository._format_timestamp(retain_until),
+                            "worktree_identity": (
+                                None if retained_identity is None else dict(retained_identity)
+                            ),
+                        },
+                        f"worktree.retained:{stored.id}",
+                    )
+                    EventRepository._append(
+                        connection, retained, *EventRepository._validate_event(retained)
+                    )
                 decided = EventRepository._append(connection, event, *event_data)
                 row = ApprovalRepository._select_by_id(connection, normalized_id)
                 if row is None:
@@ -4276,6 +4310,42 @@ class ApprovalWorkflowRepository(_Repository):
                 return ApprovalWorkflowRecord(ApprovalRepository._to_record(row), decided)
             except (sqlite3.IntegrityError, ForbiddenJobTransitionError) as error:
                 raise ApprovalRepositoryError("Approval decision could not be recorded.") from error
+
+    def record_cleanup(
+        self,
+        job: JobRecord,
+        approval: ApprovalRecord,
+        bundle: ReviewBundleRecord,
+        retained: EventRecord,
+        event: EventCreate,
+    ) -> EventRecord:
+        """Append cleanup evidence only while its rejected review remains unchanged."""
+        if (
+            job.state is not JobState.REJECTED
+            or approval.job_id != job.id
+            or approval.decision is not ApprovalDecision.REJECTED
+            or event.job_id != job.id
+            or event.event_type
+            not in {"job.worktree.cleanup.started", "job.worktree.cleanup.completed"}
+        ):
+            raise ApprovalValidationError("Cleanup evidence does not identify a rejected job.")
+        event_data = EventRepository._validate_event(event)
+        with self._write_connection() as connection:
+            self._assert_snapshot(connection, job, bundle)
+            row = ApprovalRepository._select_by_id(connection, approval.id)
+            retention_row = EventRepository._select_by_id(connection, retained.id)
+            if (
+                row is None
+                or ApprovalRepository._to_record(row) != approval
+                or retention_row is None
+                or EventRepository._to_record(retention_row) != retained
+                or retained.job_id != job.id
+                or retained.event_type != "job.worktree.retained"
+                or retained.payload.get("approval_id") != approval.id
+                or retained.payload.get("bundle_hash") != bundle.payload_hash
+            ):
+                raise ApprovalWorkflowConflictError("Rejected retention state changed.")
+            return EventRepository._append(connection, event, *event_data)
 
     @staticmethod
     def _assert_snapshot(

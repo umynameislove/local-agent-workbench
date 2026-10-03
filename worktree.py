@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import stat
 import string
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from engine import (
     ProcessRunnerError,
     run_process,
 )
+from write_boundary import WriteBoundary, WriteBoundaryError
 
 _WORKTREE_EVENT_TYPE = "job.worktree.created"
 _WORKTREE_IDEMPOTENCY_KEY = "worktree-created"
@@ -49,6 +51,49 @@ class WorktreeConflictError(WorktreeError):
 
 class WorktreeUnavailableError(WorktreeError):
     """Raised when Git or durable storage is unavailable."""
+
+
+def worktree_identity(path: Path) -> dict[str, int | str] | None:
+    """Capture linked worktree identity without retaining a private path."""
+    try:
+        boundary = WriteBoundary(path)
+        root = boundary.root.stat()
+        marker = boundary.root / ".git"
+        metadata = marker.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            return None
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise WorktreeConflictError("Linked worktree metadata is invalid.")
+
+        def stable(value: os.stat_result) -> tuple[int, ...]:
+            return (
+                value.st_dev,
+                value.st_ino,
+                value.st_mode,
+                value.st_nlink,
+                value.st_size,
+                value.st_mtime_ns,
+            )
+
+        descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            if stable(os.fstat(descriptor)) != stable(metadata):
+                raise WorktreeConflictError("Linked worktree metadata changed.")
+            content = os.read(descriptor, 16_385)
+        finally:
+            os.close(descriptor)
+        if len(content) > 16_384 or stable(metadata) != stable(marker.lstat()):
+            raise WorktreeConflictError("Linked worktree metadata changed.")
+        boundary.verify()
+        return {
+            "device": root.st_dev,
+            "inode": root.st_ino,
+            "git_device": metadata.st_dev,
+            "git_inode": metadata.st_ino,
+            "git_digest": hashlib.sha256(content).hexdigest(),
+        }
+    except (OSError, ValueError, WriteBoundaryError) as error:
+        raise WorktreeUnavailableError("Worktree identity cannot be captured.") from error
 
 
 @dataclass(frozen=True)
@@ -138,6 +183,144 @@ class WorktreeManager:
             raise WorktreeConflictError("Job worktree binding is invalid.")
         await self._verify_repository(project, contract.base_commit)
         return await self._verify_worktree(project, target, contract)
+
+    async def verify_removable(self, job: JobRecord, identity: Mapping[str, object]) -> Path:
+        """Require the original linked artifact and no unreviewed disposal targets."""
+        target = await self.verify_bound(job)
+        if worktree_identity(target) != identity:
+            raise WorktreeConflictError("Retained worktree identity changed.")
+        contract = self._contract(job)
+        created = tuple(
+            event for event in self._events.list(job.id) if event.event_type == _WORKTREE_EVENT_TYPE
+        )
+        if len(created) != 1 or created[0].payload != contract.payload:
+            raise WorktreeConflictError("Worktree creation evidence is invalid.")
+        records = await self._registrations(contract.project_root)
+        matching = [record for record in records if record.get("worktree") == os.fsencode(target)]
+        if matching != [
+            {
+                "worktree": os.fsencode(target),
+                "HEAD": contract.base_commit.encode("ascii"),
+                "branch": f"refs/heads/{contract.branch}".encode("ascii"),
+            }
+        ]:
+            raise WorktreeConflictError("Retained worktree registration changed or is locked.")
+        ignored = await self._git(
+            ("ls-files", "--others", "--ignored", "--exclude-standard", "-z"), cwd=target
+        )
+        index = await self._git(("ls-files", "--stage", "-z"), cwd=target)
+        if ignored.returncode != 0 or index.returncode != 0:
+            raise WorktreeUnavailableError("Retained worktree inventory is unavailable.")
+        if ignored.stdout or any(
+            record.startswith(b"160000 ") for record in index.stdout.split(b"\0")
+        ):
+            raise WorktreeConflictError("Worktree contains ignored files or nested repositories.")
+        self._disposal_snapshot(target)
+        if worktree_identity(target) != identity:
+            raise WorktreeConflictError("Retained worktree changed during inspection.")
+        return target
+
+    @staticmethod
+    def _disposal_snapshot(target: Path) -> dict[str, tuple[int, ...]]:
+        """Inspect every disposal entry and detect changes across the final review."""
+
+        def failed_walk(error: OSError) -> None:
+            raise WorktreeUnavailableError("Retained worktree cannot be inspected.") from error
+
+        snapshot: dict[str, tuple[int, ...]] = {}
+        try:
+            device = target.stat().st_dev
+            for parent, directories, files in os.walk(
+                target, onerror=failed_walk, followlinks=False
+            ):
+                for name in (*directories, *files):
+                    entry = Path(parent) / name
+                    if entry == target / ".git":
+                        continue
+                    metadata = entry.lstat()
+                    if (
+                        name == ".git"
+                        or metadata.st_dev != device
+                        or not (stat.S_ISREG(metadata.st_mode) or stat.S_ISDIR(metadata.st_mode))
+                        or (stat.S_ISREG(metadata.st_mode) and metadata.st_nlink != 1)
+                    ):
+                        raise WorktreeConflictError("Worktree contains unsafe disposal targets.")
+                    snapshot[str(entry.relative_to(target))] = (
+                        metadata.st_dev,
+                        metadata.st_ino,
+                        metadata.st_mode,
+                        metadata.st_nlink,
+                        metadata.st_size,
+                        metadata.st_mtime_ns,
+                        metadata.st_ctime_ns,
+                    )
+        except OSError as error:
+            raise WorktreeUnavailableError("Retained worktree cannot be inspected.") from error
+        return snapshot
+
+    async def remove_retained(
+        self,
+        job: JobRecord,
+        identity: Mapping[str, object],
+        *,
+        before_remove: Callable[[], Awaitable[None]],
+    ) -> None:
+        """Remove only a verified retained tree, never its branch or other metadata."""
+        target = await self.verify_removable(job, identity)
+        contract = self._contract(job)
+        snapshot = self._disposal_snapshot(target)
+        await before_remove()
+        if worktree_identity(target) != identity or self._disposal_snapshot(target) != snapshot:
+            raise WorktreeConflictError("Retained worktree changed before removal.")
+        result = await self._git(
+            ("worktree", "remove", "--force", "--", str(target)),
+            cwd=contract.project_root,
+            timeout=60,
+        )
+        if result.returncode != 0:
+            raise WorktreeUnavailableError("Retained worktree removal did not complete.")
+        try:
+            target.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise WorktreeUnavailableError("Worktree removal cannot be verified.") from error
+        else:
+            raise WorktreeConflictError("Worktree removal is incomplete.")
+        records = await self._registrations(contract.project_root)
+        branch = await self._git(
+            ("rev-parse", "--verify", f"refs/heads/{contract.branch}"), cwd=contract.project_root
+        )
+        if (
+            any(record.get("worktree") == os.fsencode(target) for record in records)
+            or branch.returncode != 0
+            or self._decode_commit(branch.stdout) != contract.base_commit
+        ):
+            raise WorktreeConflictError("Worktree removal outcome requires attention.")
+
+    async def _registrations(self, project: Path) -> tuple[dict[str, bytes], ...]:
+        result = await self._git(("worktree", "list", "--porcelain", "-z"), cwd=project)
+        if result.returncode != 0:
+            raise WorktreeUnavailableError("Worktree registration is unavailable.")
+        records: list[dict[str, bytes]] = []
+        record: dict[str, bytes] = {}
+        try:
+            for field in result.stdout.split(b"\0"):
+                if not field:
+                    if record:
+                        records.append(record)
+                        record = {}
+                    continue
+                key, _, value = field.partition(b" ")
+                name = key.decode("ascii")
+                if name in record:
+                    raise ValueError
+                record[name] = value
+            if record:
+                records.append(record)
+        except (UnicodeError, ValueError) as error:
+            raise WorktreeConflictError("Worktree registration is invalid.") from error
+        return tuple(records)
 
     async def _create_locked(self, job_id: str) -> WorktreeBlock:
         job = self._load_job(job_id)
@@ -499,7 +682,28 @@ class WorktreeManager:
         cwd: Path,
         timeout: float = 20,
     ) -> ProcessResult:
+        environment = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "C",
+            "LC_ALL": "C",
+            "TMPDIR": "/tmp",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        command = (
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "submodule.recurse=false",
+            *arguments,
+        )
         try:
-            return await run_process(("git", *arguments), cwd=cwd, timeout=timeout)
+            return await run_process(command, cwd=cwd, timeout=timeout, env=environment)
         except (ProcessRunnerError, ValueError) as error:
             raise WorktreeUnavailableError("Git operation is unavailable.") from error
