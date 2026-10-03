@@ -53,3 +53,6 @@ jobs:
 
       - name: Run tests
         run: uv run pytest
+
+      - name: Verify workspace controller
+        run: node --test tests/workspace_client.test.cjs
