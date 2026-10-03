@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Workspace · Local Agent Workbench</title>
+  <style>
+    :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --bg: #131518; --panel: #1a1d21; --line: #31353c; --ink: #eceef1; --muted: #a5abb6;
+      --accent: #b9d4b5; --warm: #eac78a; --danger: #ffb0ab; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; }
+    button, select, textarea { font: inherit; }
+    button, select { min-height: 36px; border: 1px solid var(--line); border-radius: 8px;
+      color: var(--ink); background: #24282e; padding: 7px 12px; }
+    button { cursor: pointer; }
+    button:hover:not(:disabled) { background: #343b43; }
+    button:disabled { cursor: not-allowed; opacity: .5; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #17221b;
+      font-weight: 650; }
+    button.primary:hover:not(:disabled) { background: #cce5c8; }
+    :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    [hidden] { display: none !important; }
+    .skip { position: absolute; left: 12px; top: -80px; z-index: 9; background: var(--accent);
+      padding: 10px; color: #17221b; }
+    .skip:focus { top: 12px; }
+    .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; padding: 0 24px; border-bottom: 1px solid var(--line); }
+    .brand { display: flex; align-items: center; gap: 12px; font-weight: 600; }
+    .mark { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px;
+      background: var(--accent); color: #17221b; font-size: 17px; }
+    .topbar small { font-weight: 400; color: var(--muted); }
+    .health { color: var(--muted); font-size: 12px; }
+    .layout { display: grid; grid-template-columns: 252px minmax(0, 1fr) 272px;
+      min-height: calc(100dvh - 64px); }
+    .sidebar { background: #171a1e; padding: 24px 16px; border-right: 1px solid var(--line); }
+    .eyebrow { font-size: 11px; letter-spacing: .09em; color: var(--muted); font-weight: 650;
+      text-transform: uppercase; margin: 0 0 12px; }
+    .sidebar h2 { margin: 24px 0 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
+    .project, .task { display: block; width: 100%; text-align: left; background: transparent;
+      border-color: transparent; margin-bottom: 5px; overflow-wrap: anywhere; }
+    .project[aria-current="true"], .task[aria-current="true"] { background: #2a332d;
+      border-color: #435347; }
+    .project { font-weight: 550; }
+    .project small, .task small { display: block; color: var(--muted); font-size: 11px;
+      line-height: 1.7; font-weight: 400; }
+    .task span { display: block; line-height: 1.45; }
+    #new-task { width: 100%; margin: 16px 0 4px; }
+    #task-list { max-height: 50dvh; overflow-y: auto; padding: 3px; margin: -3px; }
+    .sidebar-note { font-size: 12px; color: var(--muted); line-height: 1.6; }
+    .workspace { min-width: 0; display: flex; flex-direction: column; }
+    .task-header { padding: 24px 32px 20px; border-bottom: 1px solid var(--line); }
+    .header-row { display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 12px; }
+    h1 { font-size: 21px; line-height: 1.4; font-weight: 600; margin: 5px 0 8px;
+      overflow-wrap: anywhere; }
+    .subtle { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .badge { display: inline-block; font-size: 11px; padding: 5px 9px; border-radius: 6px;
+      background: #29342e; color: var(--accent); white-space: nowrap; }
+    #attention { margin-top: 14px; padding: 10px 12px; border-radius: 8px; color: var(--warm);
+      background: #312a20; border: 1px solid #564a33; line-height: 1.5; }
+    #notice { margin: 16px 32px 0; padding: 12px; background: #332529; color: var(--danger);
+      border: 1px solid #684248; border-radius: 8px; line-height: 1.6; overflow-wrap: anywhere; }
+    .conversation { padding: 28px 32px; flex: 1; }
+    .welcome { max-width: 480px; margin: 8vh auto 7vh; }
+    .welcome h2 { font-size: 28px; line-height: 1.3; font-weight: 550; margin: 0 0 14px; }
+    .welcome p { color: var(--muted); line-height: 1.8; }
+    .welcome .steps { color: var(--accent); font-size: 12px; }
+    .request { padding: 16px 18px; border: 1px solid var(--line); border-radius: 12px;
+      background: var(--panel); margin: 0 0 26px; }
+    .request p, .event p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7;
+      margin: 8px 0 0; }
+    .activity-heading { display: flex; align-items: center; justify-content: space-between;
+      gap: 10px; margin-bottom: 18px; }
+    .activity-heading h2 { font-size: 13px; font-weight: 600; margin: 0; }
+    #activity { padding-left: 15px; border-left: 1px solid var(--line); }
+    .event { position: relative; padding: 0 0 24px 10px; }
+    .event::before { content: ""; position: absolute; left: -19px; top: 5px;
+      width: 7px; height: 7px; background: #80978a; border-radius: 50%; }
+    .event h3 { font-size: 12px; margin: 0; font-weight: 550; }
+    .event time { font-size: 11px; color: var(--muted); display: block; margin-top: 4px; }
+    .event p { color: #c6cbd2; font-size: 13px; }
+    .composer-wrap { position: sticky; bottom: 0; background: var(--bg);
+      padding: 16px 32px 22px; border-top: 1px solid var(--line); }
+    .composer-wrap[data-mode="history"] { position: static; }
+    .composer { padding: 15px; background: #20242a; border: 1px solid #414851;
+      border-radius: 12px; }
+    .composer label { font-size: 12px; color: #c6cbd2; }
+    textarea { display: block; width: 100%; min-height: 92px; max-height: 240px; resize: vertical;
+      border: 0; background: transparent; color: var(--ink); line-height: 1.6;
+      margin: 7px 0 14px; padding: 4px; }
+    textarea:focus-visible { outline-offset: 0; border-radius: 4px; }
+    textarea::placeholder { color: #929aa5; }
+    .composer-actions { display: flex; align-items: center; justify-content: space-between;
+      gap: 12px; flex-wrap: wrap; }
+    .runtime-field { display: flex; align-items: center; gap: 8px; }
+    .composer-help { margin: 10px 0 0; font-size: 11px; color: var(--muted); line-height: 1.7; }
+    .composer[data-mode="history"] label, .composer[data-mode="history"] textarea,
+    .composer[data-mode="history"] .composer-actions { display: none; }
+    .composer[data-mode="history"] .composer-help { margin: 0; }
+    .inspector { border-left: 1px solid var(--line); padding: 24px 20px; }
+    .inspector section { margin-bottom: 28px; }
+    .inspector h2 { font-size: 12px; font-weight: 600; margin: 0 0 14px; }
+    dl { margin: 0; }
+    dt { color: var(--muted); font-size: 11px; margin: 14px 0 4px; }
+    dd { margin: 0; font-size: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+    #next-action { width: 100%; margin-top: 12px; }
+    .boundary { border-top: 1px solid var(--line); padding-top: 20px; }
+    .boundary p { line-height: 1.7; color: var(--muted); font-size: 12px; }
+    #refresh { padding: 5px 9px; min-height: 30px; font-size: 11px; }
+    #header-action { display: none; margin-top: 14px; }
+    @media (max-width: 1180px) {
+      .layout { grid-template-columns: 222px minmax(0, 1fr); }
+      .inspector { grid-column: 2; border-left: 0; border-top: 1px solid var(--line);
+        display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 24px 32px; }
+      .inspector section { margin: 0; }
+      .boundary { grid-column: 1 / -1; }
+      .sidebar { grid-row: 1 / 3; }
+      #header-action { display: inline-block; }
+      #next-action { display: none; }
+    }
+    @media (max-width: 720px) {
+      .topbar { height: auto; min-height: 64px; padding: 14px 16px; }
+      .topbar small { display: none; }
+      .layout { display: block; }
+      .sidebar { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px; }
+      #project-list { display: flex; gap: 8px; overflow: auto; padding: 3px; }
+      .project { min-width: 165px; }
+      #task-list { max-height: 180px; }
+      .task-header, .conversation { padding: 20px 16px; }
+      #notice { margin: 12px 16px 0; }
+      .composer-wrap { padding: 16px; }
+      .inspector { padding: 24px 16px; gap: 20px; }
+      .welcome { margin: 24px 0; }
+      .welcome h2 { font-size: 25px; }
+    }
+    @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+  </style>
+  <script src="/workspace.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">Skip to workspace</a>
+  <header class="topbar">
+    <div class="brand"><span class="mark" aria-hidden="true">↗</span>
+      <span>Local Agent Workbench <small> / Workspace</small></span></div>
+    <span id="health" class="health" role="status">Connecting to local backend…</span>
+  </header>
+  <div class="layout">
+    <aside class="sidebar" aria-label="Project and task navigation">
+      <p class="eyebrow">Your workspace</p>
+      <nav id="project-list" aria-label="Projects"></nav>
+      <p id="project-empty" class="sidebar-note" hidden>No configured projects. Set project roots in the runtime configuration, then restart the app.</p>
+      <button id="new-task" class="primary" type="button" disabled>＋ New task</button>
+      <h2>Task history</h2>
+      <nav id="task-list" aria-label="Tasks"></nav>
+      <p id="task-empty" class="sidebar-note">Choose a project to see its tasks.</p>
+      <button id="load-older" type="button" hidden>Load older tasks</button>
+      <p class="sidebar-note">Stored locally. No hosted relay.<br>Drafts stay in this page until you close it.</p>
+    </aside>
+    <main id="main" class="workspace" tabindex="-1">
+      <header class="task-header">
+        <p id="breadcrumb" class="eyebrow">Workspace</p>
+        <div class="header-row"><h1 id="task-title">A focused place for your next task.</h1>
+          <span id="task-state" class="badge">New task</span></div>
+        <div id="task-meta" class="subtle">Project context, durable history and clear next actions.</div>
+        <div id="attention" role="status" hidden></div>
+        <button id="header-action" class="primary" type="button" hidden></button>
+      </header>
+      <div id="notice" role="alert" hidden></div>
+      <div class="conversation">
+        <section id="welcome" class="welcome">
+          <p class="eyebrow">Start with a clear request</p>
+          <h2>One project.<br>One task. A visible next step.</h2>
+          <p>Create a task, inspect a demo plan and prepare an isolated worktree. Reopen its recorded activity whenever you need context.</p>
+          <p class="steps">Create task → Demo plan → Isolated worktree</p>
+        </section>
+        <section id="transcript" aria-label="Selected task activity" hidden>
+          <article class="request"><span class="eyebrow">Your request</span><p id="request-text"></p></article>
+          <div class="activity-heading"><h2>Recorded activity</h2>
+            <span id="stream-status" class="subtle" role="status">Connecting…</span></div>
+          <p id="event-empty" class="subtle">No recorded events yet. Your request is safely stored.</p>
+          <div id="activity" role="log" aria-live="off"></div>
+          <p id="event-limit" class="subtle" hidden>Showing the most recent 500 events. Earlier events remain in the local ledger.</p>
+        </section>
+      </div>
+      <div id="composer-wrap" class="composer-wrap">
+        <form id="composer" class="composer">
+          <label for="prompt">New task request</label>
+          <textarea id="prompt" placeholder="What would you like to work on?" aria-describedby="composer-help" required disabled></textarea>
+          <div class="composer-actions">
+            <div class="runtime-field"><label for="runtime">Requested runtime</label>
+              <select id="runtime" disabled><option value="auto">Auto</option><option value="codex">Codex</option><option value="claude">Claude</option><option value="local">Local</option></select></div>
+            <button id="create-task" class="primary" type="submit" disabled>Create task ↗</button>
+          </div>
+          <p id="composer-help" class="composer-help">Choose a project to start. This shell does not start native execution or make paid API calls.</p>
+        </form>
+      </div>
+    </main>
+    <aside class="inspector" aria-label="Task context and next action">
+      <section><p class="eyebrow">Context</p><h2 id="context-title">No project selected</h2>
+        <dl><dt>Data policy</dt><dd id="policy">Not available</dd>
+          <dt>Cloud permission</dt><dd id="cloud">Not available</dd>
+          <dt>Requested runtime</dt><dd id="requested-runtime">Not selected</dd>
+          <dt>Worktree</dt><dd id="worktree">Not created</dd></dl></section>
+      <section><p class="eyebrow">Next step</p><h2 id="action-title">Create a task</h2>
+        <p id="action-description" class="subtle">Select a project and describe a bounded request.</p>
+        <button id="next-action" class="primary" type="button" hidden></button>
+        <button id="refresh" type="button">Refresh state</button></section>
+      <section class="boundary"><h2>Connected, without pretending</h2>
+        <p>Tasks, demo planning, worktrees and the event ledger are connected to the local backend.</p>
+        <p>Native execution, follow up chat, provider quota and the review interface are not connected here yet. A requested runtime is a preference, not proof of execution.</p></section>
+    </aside>
+  </div>
+  <noscript>This workspace requires JavaScript to connect to the local backend.</noscript>
+</body>
+</html>

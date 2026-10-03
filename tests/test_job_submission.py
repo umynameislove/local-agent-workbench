@@ -97,7 +97,7 @@ async def test_create_job_snapshots_server_observed_state_and_keeps_it_immutable
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             first_response = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": request_text},
@@ -206,7 +206,7 @@ async def test_invalid_payloads_fail_before_git_or_database_work(
     async with api.router.lifespan_context(api):
         monkeypatch.setattr("job_submission.run_process", unexpected_git)
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             responses = [
                 await client.post("/api/jobs", json=payload) for payload in invalid_payloads
             ]
@@ -230,7 +230,7 @@ async def test_missing_project_fails_without_git_or_job(
     async with api.router.lifespan_context(api):
         monkeypatch.setattr("job_submission.run_process", unexpected_git)
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/api/jobs",
                 json={"project_id": "missing", "request": "Inspect this project."},
@@ -258,7 +258,7 @@ async def test_project_persisted_from_removed_config_is_not_active(tmp_path: Pat
         assert restarted.state.projects == ()
         assert restarted.state.project_repository.get("sample-project").root == str(repository)
         transport = httpx.ASGITransport(app=restarted)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": "Inspect this project."},
@@ -279,7 +279,7 @@ async def test_repository_without_commit_returns_sanitized_conflict(tmp_path: Pa
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": "Inspect this project."},
@@ -310,7 +310,7 @@ async def test_git_failure_and_invalid_output_are_sanitized(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             monkeypatch.setattr("job_submission.run_process", unavailable)
             unavailable_response = await client.post(
                 "/api/jobs",
@@ -345,7 +345,7 @@ async def test_identity_conflict_and_storage_failure_do_not_replace_jobs(tmp_pat
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             created = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": "First request."},

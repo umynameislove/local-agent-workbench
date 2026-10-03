@@ -26,6 +26,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 py-modules = ["app", "approval_service", "cancellation", "codex_accounts", "codex_adapter", "codex_events", "db", "diff_service", "diff_types", "engine", "event_stream", "job_submission", "logging_setup", "planning", "promotion", "promotion_target", "retention", "review_bundle", "secret_gate", "verification", "worktree", "write_boundary"]
+packages = ["workspace_ui"]
+
+[tool.setuptools.package-data]
+workspace_ui = ["*.html", "*.js"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

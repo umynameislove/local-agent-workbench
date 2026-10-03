@@ -202,7 +202,7 @@ async def test_endpoint_rejects_unknown_jobs_and_invalid_cursors(tmp_path: Path)
         api.state.job_repository.create(job("job-002"))
         other = api.state.event_repository.append(event("job-002", 1))
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             unknown = await client.get("/api/jobs/missing/events")
             malformed = await client.get(
                 "/api/jobs/job-001/events",

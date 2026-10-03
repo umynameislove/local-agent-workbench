@@ -57,7 +57,7 @@ async def test_example_config_registers_one_canonical_project_and_safe_metadata(
     async with api.router.lifespan_context(api):
         stored = api.state.project_repository.get("sample-project")
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.get("/api/bootstrap")
 
     assert stored.root == str(repository.resolve())
@@ -83,7 +83,7 @@ async def test_missing_configuration_keeps_bootstrap_available_with_no_projects(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.get("/api/bootstrap")
 
     assert api.state.projects == ()

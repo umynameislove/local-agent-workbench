@@ -351,7 +351,7 @@ async def test_api_returns_frozen_bundle_without_caching_or_private_paths(tmp_pa
         api.state.job_repository.create(job(worktree, base))
         (worktree / "example.txt").write_text("safe change\n", encoding="utf-8")
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             missing = await client.get("/api/jobs/job-001/review-bundle")
             not_ready = await client.post("/api/jobs/job-001/review-bundle")
             await client.post("/api/jobs/job-001/review-readiness")

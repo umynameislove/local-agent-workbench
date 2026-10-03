@@ -72,6 +72,14 @@ Current foundation includes the runtime home boundary, initial local directories
 
 ## Development quick start
 
+The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, stored task history, explicitly labeled demo planning, isolated worktree creation and live ledger events. Runtime selection records a requested preference; this shell does not start native execution, provide follow up chat or display provider quota. Review controls belong to the next interface stage.
+
+Selection is restored from project and task identifiers in the URL. Reload replays the durable ledger, while drafts remain only in the open page and are never written to browser storage. Task responses omit internal snapshots and absolute storage paths. The entire HTTP surface requires a loopback client and host, rejects foreign origins and cross site browser requests, and disables response caching. This is a single operator local application, not a multiuser authentication boundary.
+
+`GET /api/jobs?project_id=...` returns recent task summaries in pages of up to 200 entries. Pass the returned `next_cursor` as `before_id` to read an older page. `GET /api/jobs/{id}` returns the selected task with its original request and current state. Both views are restricted to currently configured projects.
+
+The worktree indicator describes the stored task binding, not a fresh filesystem check. Rejected task history remains available after explicit retention cleanup; its recorded binding is preserved even when the artifact has been removed.
+
 Requires Python 3.12 and `uv`:
 
 ```bash
@@ -79,12 +87,13 @@ uv sync --frozen
 AGENT_WORKBENCH_HOME=../working-local uv run uvicorn app:app --host 127.0.0.1 --port 8765
 ```
 
-Run the complete current quality gate:
+Run the complete current quality gate with Node.js 20 or newer available for the dependency free browser controller tests:
 
 ```bash
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
+node --test tests/workspace_client.test.cjs
 ```
 
 ## Provider capabilities

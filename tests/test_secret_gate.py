@@ -300,7 +300,7 @@ async def test_api_reports_sanitized_block_then_allows_clean_retry(tmp_path: Pat
         api.state.job_repository.create(job(worktree, base))
         (worktree / "proposal.txt").write_text(f"api_key={secret}\n", encoding="utf-8")
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             blocked = await client.post("/api/jobs/job-001/review-readiness")
             (worktree / "proposal.txt").write_text("safe=true\n", encoding="utf-8")
             passed = await client.post("/api/jobs/job-001/review-readiness")
