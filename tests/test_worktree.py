@@ -145,7 +145,7 @@ async def test_worktree_uses_snapshot_commit_and_preserves_dirty_project_tree(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-isolated")
             current_head = commit_change(repository)
             (repository / "example.txt").write_text("staged edit\n", encoding="utf-8")
@@ -220,7 +220,7 @@ async def test_concurrent_retries_return_one_durable_worktree(tmp_path: Path) ->
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-retry")
             responses = await asyncio.gather(
                 *(client.post("/api/jobs/job-retry/worktree") for _ in range(8))
@@ -253,7 +253,7 @@ async def test_restart_rebinds_verified_unbound_worktree_without_duplicate(
 
     async with first_app.router.lifespan_context(first_app):
         transport = httpx.ASGITransport(app=first_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-recovery")
         branch, key, target = add_unbound_worktree(
             repository,
@@ -269,7 +269,7 @@ async def test_restart_rebinds_verified_unbound_worktree_without_duplicate(
     restarted_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
     async with restarted_app.router.lifespan_context(restarted_app):
         transport = httpx.ASGITransport(app=restarted_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             responses = await asyncio.gather(
                 *(client.post("/api/jobs/job-recovery/worktree") for _ in range(8))
             )
@@ -279,7 +279,7 @@ async def test_restart_rebinds_verified_unbound_worktree_without_duplicate(
     final_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
     async with final_app.router.lifespan_context(final_app):
         transport = httpx.ASGITransport(app=final_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             final_retry = await client.post("/api/jobs/job-recovery/worktree")
         final_events = final_app.state.event_repository.list("job-recovery")
 
@@ -343,7 +343,7 @@ async def test_restart_rejects_changed_unbound_worktree(
 
     async with first_app.router.lifespan_context(first_app):
         transport = httpx.ASGITransport(app=first_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-changed")
         branch, _, target = add_unbound_worktree(
             repository,
@@ -378,7 +378,7 @@ async def test_restart_rejects_changed_unbound_worktree(
     restarted_app = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
     async with restarted_app.router.lifespan_context(restarted_app):
         transport = httpx.ASGITransport(app=restarted_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post("/api/jobs/job-changed/worktree")
         stored = restarted_app.state.job_repository.get("job-changed")
         events = restarted_app.state.event_repository.list("job-changed")
@@ -415,7 +415,7 @@ async def test_rebind_failure_preserves_preexisting_worktree_for_inspection(
 
     async with first_app.router.lifespan_context(first_app):
         transport = httpx.ASGITransport(app=first_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-rebind-failure")
         branch, _, target = add_unbound_worktree(
             repository,
@@ -438,7 +438,7 @@ async def test_rebind_failure_preserves_preexisting_worktree_for_inspection(
                 """
             )
         transport = httpx.ASGITransport(app=restarted_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post("/api/jobs/job-rebind-failure/worktree")
         stored = restarted_app.state.job_repository.get("job-rebind-failure")
         events = restarted_app.state.event_repository.list("job-rebind-failure")
@@ -473,7 +473,7 @@ async def test_unplanned_job_cannot_create_a_worktree(tmp_path: Path) -> None:
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             created = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": "Do not write yet."},
@@ -508,7 +508,7 @@ async def test_project_policy_blocks_write_capable_worktrees(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-policy")
             response = await client.post("/api/jobs/job-policy/worktree")
 
@@ -538,7 +538,7 @@ async def test_existing_target_or_branch_fails_closed(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-conflict")
             branch, key = identity_for("job-conflict")
             target = runtime / "worktrees" / key
@@ -579,7 +579,7 @@ async def test_symlinked_worktree_storage_is_rejected(tmp_path: Path) -> None:
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-storage")
             storage = runtime / "worktrees"
             storage.rmdir()
@@ -609,7 +609,7 @@ async def test_persistence_failure_rolls_back_new_worktree_and_branch(tmp_path: 
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_and_plan(client, "job-rollback")
             head_before = git(repository, "rev-parse", "HEAD")
             status_before = git(repository, "status", "--porcelain=v1")

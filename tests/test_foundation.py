@@ -120,7 +120,7 @@ async def test_health_and_bootstrap_contracts(tmp_path: Path) -> None:
         assert isinstance(api.state.recovery_service, RecoveryService)
         assert api.state.recovery_items == ()
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             health = await client.get("/api/health")
             bootstrap = await client.get("/api/bootstrap")
 

@@ -6,10 +6,11 @@ import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
+from textwrap import shorten
 from typing import Annotated
 
-from fastapi import Body, FastAPI, Header, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from approval_service import (
     ApprovalInputError,
@@ -28,6 +29,7 @@ from db import (
     EventRepository,
     EventRepositoryError,
     JobNotFoundError,
+    JobRecord,
     JobRepository,
     JobRepositoryError,
     JobValidationError,
@@ -93,6 +95,7 @@ from secret_gate import (
     SecretGateUnavailableError,
 )
 from verification import VerificationRunner
+from workspace_ui import asset
 from worktree import (
     WorktreeConflictError,
     WorktreeManager,
@@ -224,6 +227,27 @@ def create_app(
 
     api = FastAPI(title="Local Agent Workbench", version=APP_VERSION, lifespan=lifespan)
 
+    @api.middleware("http")
+    async def local_boundary(request: Request, call_next: Callable) -> Response:
+        try:
+            _check_local_origin(request)
+        except HTTPException as error:
+            response = JSONResponse({"detail": error.detail}, status_code=error.status_code)
+        else:
+            response = await call_next(request)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    @api.get("/", include_in_schema=False)
+    async def workspace() -> Response:
+        return asset("index.html")
+
+    @api.get("/workspace.js", include_in_schema=False)
+    async def workspace_script() -> Response:
+        return asset("workspace.js")
+
     @api.get("/api/health")
     async def health(request: Request) -> dict[str, object]:
         active: RuntimeHome = request.app.state.runtime
@@ -288,6 +312,40 @@ def create_app(
                 "X-Accel-Buffering": "no",
             },
         )
+
+    @api.get("/api/jobs")
+    async def list_jobs(
+        request: Request,
+        project_id: str,
+        limit: Annotated[int, Query(ge=1, le=200)] = 50,
+        before_id: str | None = None,
+    ) -> dict[str, object]:
+        if project_id not in {project.id for project in request.app.state.projects}:
+            raise HTTPException(status_code=404, detail="Project does not exist.")
+        try:
+            jobs = request.app.state.job_repository.list_recent(
+                project_id, limit=limit, before_id=before_id
+            )
+        except JobValidationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except JobRepositoryError as error:
+            raise HTTPException(status_code=503, detail="Task list is unavailable.") from error
+        return {
+            "jobs": [_workspace_job(job, summary=True) for job in jobs],
+            "next_cursor": jobs[-1].id if len(jobs) == limit else None,
+        }
+
+    @api.get("/api/jobs/{job_id}")
+    async def read_job(request: Request, job_id: str) -> dict[str, object]:
+        try:
+            job = request.app.state.job_repository.get(job_id)
+        except (JobNotFoundError, JobValidationError) as error:
+            raise HTTPException(status_code=404, detail="Job does not exist.") from error
+        except JobRepositoryError as error:
+            raise HTTPException(status_code=503, detail="Task detail is unavailable.") from error
+        if job.project_id not in {project.id for project in request.app.state.projects}:
+            raise HTTPException(status_code=404, detail="Job does not exist.")
+        return _workspace_job(job)
 
     @api.post("/api/jobs", status_code=201)
     async def create_job(
@@ -407,7 +465,6 @@ def create_app(
         job_id: str,
         payload: Annotated[object, Body()],
     ) -> dict[str, object]:
-        _check_approval_origin(request)
         response.headers["Cache-Control"] = "no-store"
         service: ApprovalService = request.app.state.approval_service
         try:
@@ -428,7 +485,6 @@ def create_app(
         approval_id: str,
         payload: Annotated[object, Body()],
     ) -> dict[str, object]:
-        _check_approval_origin(request)
         response.headers["Cache-Control"] = "no-store"
         service: ApprovalService = request.app.state.approval_service
         try:
@@ -449,7 +505,6 @@ def create_app(
         approval_id: str,
         payload: Annotated[object, Body()],
     ) -> dict[str, object]:
-        _check_approval_origin(request)
         response.headers["Cache-Control"] = "no-store"
         service: PromotionService = request.app.state.promotion_service
         try:
@@ -467,7 +522,6 @@ def create_app(
     async def read_retention(
         request: Request, response: Response, job_id: str
     ) -> dict[str, object]:
-        _check_approval_origin(request)
         response.headers["Cache-Control"] = "no-store"
         service: RetentionService = request.app.state.retention_service
         try:
@@ -483,7 +537,6 @@ def create_app(
     async def cleanup_worktree(
         request: Request, response: Response, job_id: str, payload: Annotated[object, Body()]
     ) -> dict[str, object]:
-        _check_approval_origin(request)
         response.headers["Cache-Control"] = "no-store"
         service: RetentionService = request.app.state.retention_service
         try:
@@ -500,18 +553,37 @@ def create_app(
     return api
 
 
-def _check_approval_origin(request: Request) -> None:
+def _workspace_job(job: JobRecord, *, summary: bool = False) -> dict[str, object]:
+    result: dict[str, object] = {
+        "id": job.id,
+        "project_id": job.project_id,
+        "title": shorten(job.request, width=100, placeholder="…"),
+        "state": job.state.value,
+        "runtime": job.runtime.value,
+        "model": job.model,
+        "worktree_ready": job.worktree_path is not None,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+    }
+    if not summary:
+        result["request"] = job.request
+    return result
+
+
+def _check_local_origin(request: Request) -> None:
     if request.url.hostname not in {"127.0.0.1", "localhost", "::1"}:
-        raise HTTPException(status_code=403, detail="Approvals require a local host.")
+        raise HTTPException(status_code=403, detail="Workbench requires a local host.")
     try:
         client = ipaddress.ip_address(request.client.host) if request.client else None
     except ValueError:
         client = None
     if client is None or not client.is_loopback:
-        raise HTTPException(status_code=403, detail="Approvals require a local client.")
+        raise HTTPException(status_code=403, detail="Workbench requires a local client.")
     origin = request.headers.get("origin")
     if origin is not None and origin != f"{request.url.scheme}://{request.headers.get('host')}":
-        raise HTTPException(status_code=403, detail="Cross origin approvals are not allowed.")
+        raise HTTPException(status_code=403, detail="Cross origin requests are not allowed.")
+    if request.headers.get("sec-fetch-site") == "cross-site":
+        raise HTTPException(status_code=403, detail="Cross site requests are not allowed.")
 
 
 app = create_app()

@@ -1748,6 +1748,33 @@ class JobRepository(_Repository):
             ).fetchall()
         return tuple(self._to_record(row) for row in rows)
 
+    def list_recent(
+        self, project_id: str, *, limit: int = 50, before_id: str | None = None
+    ) -> tuple[JobRecord, ...]:
+        project_id = self._validate_text(project_id, field="project_id")
+        if type(limit) is not int or not 1 <= limit <= 200:
+            raise JobValidationError("Job page size must be between 1 and 200.")
+        parameters: list[str | int] = [project_id]
+        boundary = ""
+        with self._connection() as connection:
+            if before_id is not None:
+                self._validate_text(before_id, field="before_id")
+                cursor = self._select_by_id(connection, before_id)
+                if cursor is None or cursor["project_id"] != project_id:
+                    raise JobValidationError("Job page cursor is invalid.")
+                boundary = "AND (created_at, id) < (?, ?)"
+                parameters.extend((cursor["created_at"], cursor["id"]))
+            rows = connection.execute(
+                f"""
+                SELECT id, project_id, request, request_snapshot, state,
+                       runtime, model, worktree_path, created_at, updated_at
+                FROM jobs WHERE project_id = ? {boundary}
+                ORDER BY created_at DESC, id DESC LIMIT ?
+                """,
+                (*parameters, limit),
+            ).fetchall()
+        return tuple(self._to_record(row) for row in rows)
+
     @classmethod
     def _insert(
         cls,

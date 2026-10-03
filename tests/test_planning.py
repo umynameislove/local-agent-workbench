@@ -83,7 +83,7 @@ async def test_plan_is_durable_and_does_not_mutate_a_dirty_repository(tmp_path: 
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_job(client, job_id="job-plan")
             (repository / "example.txt").write_text("local edit\n", encoding="utf-8")
             (repository / "untracked.txt").write_text("keep me\n", encoding="utf-8")
@@ -137,14 +137,14 @@ async def test_plan_can_be_read_and_retried_after_restart_without_duplicate_even
 
     async with first_app.router.lifespan_context(first_app):
         transport = httpx.ASGITransport(app=first_app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_job(client, job_id="job-plan")
             original = await client.post("/api/jobs/job-plan/plan")
 
     restarted = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})
     async with restarted.router.lifespan_context(restarted):
         transport = httpx.ASGITransport(app=restarted)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             read = await client.get("/api/jobs/job-plan/plan")
             retry = await client.post("/api/jobs/job-plan/plan")
         events = restarted.state.event_repository.list("job-plan")
@@ -170,7 +170,7 @@ async def test_missing_or_unplanned_job_returns_sanitized_errors(tmp_path: Path)
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             missing_post = await client.post("/api/jobs/missing/plan")
             missing_get = await client.get("/api/jobs/missing/plan")
             invalid_id = await client.post("/api/jobs/%20bad%20/plan")
@@ -201,7 +201,7 @@ async def test_planning_rejects_jobs_that_already_have_a_worktree(tmp_path: Path
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_job(client, job_id="job-plan")
             job = api.state.job_repository.get("job-plan")
             existing = runtime / "worktrees" / "existing"
@@ -238,7 +238,7 @@ async def test_demo_planner_does_not_take_over_an_existing_planning_session(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_job(client, job_id="job-plan")
             created = api.state.job_repository.get("job-plan")
             classified = api.state.atomic_transition_service.transition(
@@ -288,7 +288,7 @@ async def test_plan_recording_failure_rolls_back_and_retry_resumes_safely(
 
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             await submit_job(client, job_id="job-plan")
             status_before = git(repository, "status", "--porcelain=v1", "--untracked-files=all")
             with sqlite3.connect(api.state.database.path) as connection:
