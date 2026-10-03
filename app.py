@@ -43,8 +43,10 @@ from engine import (
     APP_VERSION,
     RUNTIME_ENV,
     JobRuntime,
+    RetentionConfig,
     RuntimeHome,
     load_configured_projects,
+    load_optional_config,
     resolve_runtime_home,
 )
 from event_stream import EventStreamCursorError, EventStreamService
@@ -69,6 +71,13 @@ from promotion import (
     PromotionReconciliationError,
     PromotionService,
     PromotionUnavailableError,
+)
+from retention import (
+    RetentionConflictError,
+    RetentionInputError,
+    RetentionMissingError,
+    RetentionService,
+    RetentionUnavailableError,
 )
 from review_bundle import (
     ReviewBundleMissingError,
@@ -108,7 +117,12 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         runtime.bootstrap()
-        configured_projects = await load_configured_projects(runtime.config)
+        configuration = load_optional_config(runtime.config)
+        configured_projects = (
+            ()
+            if configuration is None
+            else await load_configured_projects(runtime.config, config=configuration)
+        )
         database = Database(runtime.state_db)
         schema_version = database.initialize()
         app.state.runtime = runtime
@@ -130,7 +144,9 @@ def create_app(
             app.state.event_repository,
         )
         app.state.approval_repository = ApprovalRepository(database)
-        app.state.approval_workflow_repository = ApprovalWorkflowRepository(database)
+        app.state.approval_workflow_repository = ApprovalWorkflowRepository(
+            database, retention=configuration.retention if configuration else RetentionConfig()
+        )
         app.state.planner_repository = PlannerRepository(database)
         app.state.usage_repository = UsageRepository(database)
         app.state.memory_reference_repository = MemoryReferenceRepository(database)
@@ -172,6 +188,16 @@ def create_app(
             app.state.approval_workflow_repository,
             app.state.review_bundle_repository,
             app.state.atomic_transition_service,
+            app.state.worktree_manager,
+            app.state.approval_service,
+            runtime.cache,
+        )
+        app.state.retention_service = RetentionService(
+            app.state.job_repository,
+            app.state.approval_repository,
+            app.state.approval_workflow_repository,
+            app.state.review_bundle_repository,
+            app.state.event_repository,
             app.state.worktree_manager,
             app.state.approval_service,
             runtime.cache,
@@ -435,6 +461,40 @@ def create_app(
         except (PromotionConflictError, PromotionReconciliationError) as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
         except PromotionUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.get("/api/jobs/{job_id}/retention")
+    async def read_retention(
+        request: Request, response: Response, job_id: str
+    ) -> dict[str, object]:
+        _check_approval_origin(request)
+        response.headers["Cache-Control"] = "no-store"
+        service: RetentionService = request.app.state.retention_service
+        try:
+            return service.read(job_id)
+        except RetentionMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except RetentionConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except RetentionUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
+    @api.post("/api/jobs/{job_id}/cleanup")
+    async def cleanup_worktree(
+        request: Request, response: Response, job_id: str, payload: Annotated[object, Body()]
+    ) -> dict[str, object]:
+        _check_approval_origin(request)
+        response.headers["Cache-Control"] = "no-store"
+        service: RetentionService = request.app.state.retention_service
+        try:
+            return await service.cleanup(job_id, payload)
+        except RetentionInputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except RetentionMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except RetentionConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except RetentionUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
     return api
