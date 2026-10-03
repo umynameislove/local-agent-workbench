@@ -167,6 +167,14 @@ Backups contain private application data. Store them in a protected local direct
 
 After approval, submit `{"bundle_hash":"..."}` to `POST /api/approvals/{id}/promote` from a loopback client. The service rechecks the approved worktree and frozen text diff, verifies that the original project checkout is clean and at the submitted commit, then applies the reviewed patch locally. It records `applying` before any target write and `completed` only after the changed path set and final file contents match the approved worktree. An interrupted or partial application remains `applying` for manual reconciliation and is never retried automatically. Promotion does not stage, commit, push or deploy.
 
+## Rejected worktree retention
+
+Rejecting a review keeps its worktree and atomically records an inspection deadline. The default is seven days, configured through `retention.rejected_worktree_days` in `config.json` (whole days from 1 to 365). Each rejection freezes its deadline, so later configuration changes and retries cannot shorten or extend it. Deadlines use the trusted local UTC clock, not a guaranteed physical elapsed duration across clock adjustments.
+
+Read `GET /api/jobs/{id}/retention` from a loopback client before disposal. After the deadline, an explicit `POST /api/jobs/{id}/cleanup` with `{"retention_event_id":123}` identifies the displayed record. The service verifies the original linked worktree identity, registration, creation evidence and unchanged rejected review. Ignored files, nested repositories, locked trees and unsafe paths block disposal. The project lock coordinates workbench operations but cannot exclude external filesystem writers. Do not edit the retained worktree during cleanup. Startup and rejection never perform cleanup automatically. Older rejected jobs without a retention record remain available for manual inspection.
+
+Cleanup records its intent before removing the exact worktree, then records completion only after verifying that its directory and registration disappeared and its branch remained. Job history, approvals and frozen review bundles remain in SQLite. The [Git worktree removal command](https://git-scm.com/docs/git-worktree) discards the reviewed uncommitted contents, which are not recoverable from the preserved branch. Retain a separate backup before cleanup when those contents are still needed. An interrupted operation reports `needs_attention` and cannot repeat deletion. Reconcile it manually; there is no recursive deletion or metadata pruning fallback.
+
 ## Cost boundary
 
 1. Claude Code and Codex: user's existing native subscriptions.
