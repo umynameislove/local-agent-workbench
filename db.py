@@ -389,6 +389,16 @@ class ReviewBundleRecord:
     created_at: str
 
 
+@dataclass(frozen=True)
+class ApprovalReviewRecord:
+    job: JobRecord
+    bundle: ReviewBundleRecord | None
+    current: bool
+    approval: ApprovalRecord | None
+    requested: EventRecord | None
+    decided: EventRecord | None
+
+
 MIGRATIONS = (
     Migration(
         version=1,
@@ -4100,6 +4110,72 @@ class ApprovalWorkflowRepository(_Repository):
         self._retention = RetentionConfig() if retention is None else retention
         if not isinstance(self._retention, RetentionConfig):
             raise TypeError("Approval retention must use RetentionConfig.")
+
+    def read_review(self, job_id: str) -> ApprovalReviewRecord:
+        """Read one consistent snapshot without creating or renewing authority."""
+        ApprovalRepository._validate_text(job_id, field="job_id")
+        with self._connection() as connection:
+            connection.execute("BEGIN")
+            job_row = JobRepository._select_by_id(connection, job_id)
+            if job_row is None:
+                raise JobNotFoundError("Job does not exist.")
+            job = JobRepository._to_record(job_row)
+            bundle_row = ReviewBundleRepository._select(connection, job_id)
+            bundle = None if bundle_row is None else ReviewBundleRepository._to_record(bundle_row)
+            readiness = connection.execute(
+                """
+                SELECT id FROM events WHERE job_id = ? AND event_type = 'job.review_ready'
+                ORDER BY sequence DESC LIMIT 1
+                """,
+                (job_id,),
+            ).fetchone()
+            current = bool(bundle and readiness and readiness["id"] == bundle.scan_event_id)
+            rows = connection.execute(
+                """
+                SELECT id, job_id, payload_hash, decision, actor, channel,
+                       expires_at, created_at, decided_at
+                FROM approvals WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchall()
+            records = [ApprovalRepository._to_record(row) for row in rows]
+            pending = [record for record in records if record.decision is None]
+            binding_hash = (
+                None
+                if bundle is None
+                else ApprovalRepository._payload_hash(
+                    {
+                        "job_id": job_id,
+                        "scan_event_id": bundle.scan_event_id,
+                        "bundle_hash": bundle.payload_hash,
+                    }
+                )
+            )
+            matches = [record for record in records if record.payload_hash == binding_hash]
+            if (
+                len(matches) > 1
+                or (
+                    pending
+                    and (
+                        len(pending) != 1
+                        or matches != pending
+                        or not current
+                        or job.state is not JobState.WAITING_APPROVAL
+                    )
+                )
+                or (job.state is JobState.WAITING_APPROVAL and not pending)
+            ):
+                raise ApprovalWorkflowConflictError("Approval review state is inconsistent.")
+            approval = matches[0] if matches else None
+            requested = (
+                None if approval is None else self._request_event(connection, job_id, approval.id)
+            )
+            decided = (
+                None
+                if approval is None or approval.decision is None
+                else self._decision_event(connection, job_id, approval.id)
+            )
+            return ApprovalReviewRecord(job, bundle, current, approval, requested, decided)
 
     def request(
         self,
