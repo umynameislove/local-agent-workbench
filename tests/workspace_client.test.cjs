@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const code = fs.readFileSync(path.join(__dirname, "../workspace_ui/workspace.js"), "utf8");
 const flush = async () => { for (let n = 0; n < 8; n++) await new Promise(setImmediate); };
 const deferred = () => {
@@ -18,13 +19,15 @@ const job = (id, project = "alpha") => ({
 });
 
 function harness(options = {}) {
-  const nodes = new Map(), streams = [], timers = new Map(), calls = [], jobs = new Map();
-  let handler = null, timerId = 0, currentURL = "http://localhost/?project=alpha";
+  const nodes = new Map(), streams = [], timers = new Map(), intervals = [], calls = [], jobs = new Map();
+  let handler = options.handle || null, timerId = 0, elapsed = 0;
+  let currentURL = options.url || "http://localhost/?project=alpha";
   for (const item of options.jobs || [job("A"), job("B"), job("C", "beta")]) jobs.set(item.id, item);
   const document = {hidden: false, activeElement: null};
   class Element {
     constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.dataset = {};
       this.value = ""; this.textContent = ""; this.hidden = false; this.disabled = false; }
+    set innerHTML(_) { throw new Error("Untrusted markup must not be interpreted."); }
     setAttribute(key, value) { this[key] = value; }
     append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }
     replaceChildren() { this.children = []; }
@@ -51,7 +54,7 @@ function harness(options = {}) {
       })});
     }
   }
-  const response = (data, status = 200) => ({ok: status < 400, json: async () => data});
+  const response = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
   const fetch = async (url, init) => {
     calls.push({url, init});
     if (handler) {
@@ -72,15 +75,19 @@ function harness(options = {}) {
       jobs.set(created.id, created); return response(created, 201);
     }
     const id = decodeURIComponent(url.split("/")[3]);
+    if (url.endsWith("/approval") && jobs.has(id)) return response({job_id: id,
+      project_id: jobs.get(id).project_id, job_state: jobs.get(id).state, bundle_hash: null,
+      review_current: false, server_time: "2026-01-01T00:00:00Z", approval: null});
     return response(jobs.get(id) ? {...jobs.get(id)} : {detail: "Job does not exist."}, jobs.has(id) ? 200 : 404);
   };
   const context = {
-    document, EventSource, fetch, URL, URLSearchParams, TextEncoder, console,
+    document, EventSource, fetch, URL, URLSearchParams, TextEncoder, console, crypto: crypto.webcrypto,
+    performance: {now: () => elapsed},
     location: {get href() { return currentURL; }, get search() { return new URL(currentURL).search; }},
     history: {replaceState(_, __, url) { currentURL = String(url); }},
     window: {addEventListener() {}},
     setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
-    clearTimeout(id) { timers.delete(id); }, setInterval() {},
+    clearTimeout(id) { timers.delete(id); }, setInterval(callback) { intervals.push(callback); },
   };
   document.getElementById("runtime").value = "auto";
   vm.runInNewContext(code, context, {filename: "workspace.js"});
@@ -91,6 +98,7 @@ function harness(options = {}) {
     handle(callback) { handler = callback; }, url() { return currentURL; },
     type(value) { node("prompt").value = value; node("prompt").fire("input"); },
     async tick() { for (const [id, callback] of [...timers]) { timers.delete(id); callback(); } await flush(); },
+    async advance(ms) { elapsed += ms; for (const callback of intervals) callback(); await flush(); },
   };
 }
 

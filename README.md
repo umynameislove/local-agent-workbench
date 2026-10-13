@@ -72,13 +72,17 @@ Current foundation includes the runtime home boundary, initial local directories
 
 ## Development quick start
 
-The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, stored task history, explicitly labeled demo planning, isolated worktree creation and live ledger events. Runtime selection records a requested preference; this shell does not start native execution, provide follow up chat or display provider quota. Review controls belong to the next interface stage.
+The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, stored task history, explicitly labeled demo planning, isolated worktree creation, live ledger events and frozen review decisions. Runtime selection records a requested preference; this shell does not start native execution, provide follow up chat or display provider quota.
 
 Selection is restored from project and task identifiers in the URL. Reload replays the durable ledger, while drafts remain only in the open page and are never written to browser storage. Task responses omit internal snapshots and absolute storage paths. The entire HTTP surface requires a loopback client and host, rejects foreign origins and cross site browser requests, and disables response caching. This is a single operator local application, not a multiuser authentication boundary.
 
 `GET /api/jobs?project_id=...` returns recent task summaries in pages of up to 200 entries. Pass the returned `next_cursor` as `before_id` to read an older page. `GET /api/jobs/{id}` returns the selected task with its original request and current state. Both views are restricted to currently configured projects.
 
 The worktree indicator describes the stored task binding, not a fresh filesystem check. Rejected task history remains available after explicit retention cleanup; its recorded binding is preserved even when the artifact has been removed.
+
+The review panel shows changed files, recorded verification, warnings and the unified diff. Prepare a snapshot explicitly after review readiness is recorded, view its diff, then prepare a decision. Approval ID, exact snapshot hash, project scope and original expiry appear before Approve locally, Request changes or Reject becomes available. Approval records permission only; this panel never applies a patch or publishes code. Recorded verification may predate the frozen snapshot and is not a new test run.
+
+`GET /api/jobs/{id}/approval` reads durable authority without creating an approval or extending its deadline. Reload recovers pending, expired and decided records. Historical rounds remain visible but cannot authorize a newer round. An uncertain write is not retried automatically: the panel reads stored state and keeps decisions locked until it can establish the outcome. A conflict keeps that snapshot locked. Diff content, file names and command arguments are displayed as text, not interpreted as markup or executable instructions.
 
 Requires Python 3.12 and `uv`:
 
