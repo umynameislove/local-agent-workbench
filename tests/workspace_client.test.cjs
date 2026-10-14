@@ -7,7 +7,13 @@ const vm = require("node:vm");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const code = fs.readFileSync(path.join(__dirname, "../workspace_ui/workspace.js"), "utf8");
-const flush = async () => { for (let n = 0; n < 8; n++) await new Promise(setImmediate); };
+const pendingDigests = new Set();
+const flush = async () => {
+  for (let n = 0; n < 8; n++) {
+    await new Promise(setImmediate);
+    await Promise.allSettled([...pendingDigests]);
+  }
+};
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -80,8 +86,14 @@ function harness(options = {}) {
       review_current: false, server_time: "2026-01-01T00:00:00Z", approval: null});
     return response(jobs.get(id) ? {...jobs.get(id)} : {detail: "Job does not exist."}, jobs.has(id) ? 200 : 404);
   };
+  const reviewCrypto = {subtle: {digest(...args) {
+    const pending = options.digest ? options.digest(...args) : crypto.webcrypto.subtle.digest(...args);
+    pendingDigests.add(pending);
+    pending.then(() => pendingDigests.delete(pending), () => pendingDigests.delete(pending));
+    return pending;
+  }}};
   const context = {
-    document, EventSource, fetch, URL, URLSearchParams, TextEncoder, console, crypto: crypto.webcrypto,
+    document, EventSource, fetch, URL, URLSearchParams, TextEncoder, console, crypto: reviewCrypto,
     performance: {now: () => elapsed},
     location: {get href() { return currentURL; }, get search() { return new URL(currentURL).search; }},
     history: {replaceState(_, __, url) { currentURL = String(url); }},
@@ -325,6 +337,43 @@ const enableDecision = async (h) => { await h.node("review-view").fire("click");
 const assertLocked = (h) => {
   for (const name of ["approve", "changes", "reject"]) assert.equal(h.node(`review-${name}`).disabled, true);
 };
+
+for (const failed of [false, true]) {
+  test(`review waits for digest completion and ${failed ? "locks on failure" : "then enables viewed decisions"}`, async (t) => {
+    const gate = deferred(), f = reviewFixture(); let started = false;
+    t.after(() => gate.resolve());
+    const h = harness({jobs: [{...job("A"), state: "waiting_approval"}], digest: async (...args) => {
+      started = true; await gate.promise; return crypto.webcrypto.subtle.digest(...args);
+    }});
+    h.handle((url) => {
+      if (url.endsWith("/approval")) return h.response(structuredClone(f.status));
+      if (url.endsWith("/review-bundle")) return h.response(structuredClone(f.snapshot));
+    });
+    await flush();
+    h.node("task-list").children.find((item) => item.dataset.job === "A").fire("click");
+    await new Promise(setImmediate);
+    assert.equal(started, true); assertLocked(h);
+    assert.match(h.node("review-message").textContent, /Reading stored review state/);
+    let settled = false;
+    const draining = flush().then(() => { settled = true; });
+    await new Promise(setImmediate);
+    assert.equal(settled, false);
+    if (failed) gate.reject(new Error("Synthetic digest failure."));
+    else gate.resolve();
+    await draining;
+    if (failed) {
+      assertLocked(h);
+      assert.equal(h.node("review-content").hidden, true);
+      assert.match(h.node("review-error").textContent, /Synthetic digest failure/);
+    } else {
+      assert.equal(h.node("review-id").textContent, f.approval.approval_id);
+      await enableDecision(h);
+      assert.equal(h.node("review-approve").disabled, false);
+    }
+    assert.equal(writes(h).length, 0);
+    assert.equal(pendingDigests.size, 0);
+  });
+}
 
 test("loading and URL reload are read only; original ID, scope and expiry precede every decision", async () => {
   const h = await reviewHarness({url: "http://localhost/?project=alpha&task=A"});
