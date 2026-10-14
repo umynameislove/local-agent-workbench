@@ -5,8 +5,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const code = fs.readFileSync(path.join(__dirname, "../workspace_ui/workspace.js"), "utf8");
-const flush = async () => { for (let n = 0; n < 8; n++) await new Promise(setImmediate); };
+const pendingDigests = new Set();
+const flush = async () => {
+  for (let n = 0; n < 8; n++) {
+    await new Promise(setImmediate);
+    await Promise.allSettled([...pendingDigests]);
+  }
+};
 const deferred = () => {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -18,13 +25,15 @@ const job = (id, project = "alpha") => ({
 });
 
 function harness(options = {}) {
-  const nodes = new Map(), streams = [], timers = new Map(), calls = [], jobs = new Map();
-  let handler = null, timerId = 0, currentURL = "http://localhost/?project=alpha";
+  const nodes = new Map(), streams = [], timers = new Map(), intervals = [], calls = [], jobs = new Map();
+  let handler = options.handle || null, timerId = 0, elapsed = 0;
+  let currentURL = options.url || "http://localhost/?project=alpha";
   for (const item of options.jobs || [job("A"), job("B"), job("C", "beta")]) jobs.set(item.id, item);
   const document = {hidden: false, activeElement: null};
   class Element {
     constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.dataset = {};
       this.value = ""; this.textContent = ""; this.hidden = false; this.disabled = false; }
+    set innerHTML(_) { throw new Error("Untrusted markup must not be interpreted."); }
     setAttribute(key, value) { this[key] = value; }
     append(...items) { for (const item of items) { item.parent = this; this.children.push(item); } }
     replaceChildren() { this.children = []; }
@@ -51,7 +60,7 @@ function harness(options = {}) {
       })});
     }
   }
-  const response = (data, status = 200) => ({ok: status < 400, json: async () => data});
+  const response = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
   const fetch = async (url, init) => {
     calls.push({url, init});
     if (handler) {
@@ -72,15 +81,25 @@ function harness(options = {}) {
       jobs.set(created.id, created); return response(created, 201);
     }
     const id = decodeURIComponent(url.split("/")[3]);
+    if (url.endsWith("/approval") && jobs.has(id)) return response({job_id: id,
+      project_id: jobs.get(id).project_id, job_state: jobs.get(id).state, bundle_hash: null,
+      review_current: false, server_time: "2026-01-01T00:00:00Z", approval: null});
     return response(jobs.get(id) ? {...jobs.get(id)} : {detail: "Job does not exist."}, jobs.has(id) ? 200 : 404);
   };
+  const reviewCrypto = {subtle: {digest(...args) {
+    const pending = options.digest ? options.digest(...args) : crypto.webcrypto.subtle.digest(...args);
+    pendingDigests.add(pending);
+    pending.then(() => pendingDigests.delete(pending), () => pendingDigests.delete(pending));
+    return pending;
+  }}};
   const context = {
-    document, EventSource, fetch, URL, URLSearchParams, TextEncoder, console,
+    document, EventSource, fetch, URL, URLSearchParams, TextEncoder, console, crypto: reviewCrypto,
+    performance: {now: () => elapsed},
     location: {get href() { return currentURL; }, get search() { return new URL(currentURL).search; }},
     history: {replaceState(_, __, url) { currentURL = String(url); }},
     window: {addEventListener() {}},
     setTimeout(callback) { timers.set(++timerId, callback); return timerId; },
-    clearTimeout(id) { timers.delete(id); }, setInterval() {},
+    clearTimeout(id) { timers.delete(id); }, setInterval(callback) { intervals.push(callback); },
   };
   document.getElementById("runtime").value = "auto";
   vm.runInNewContext(code, context, {filename: "workspace.js"});
@@ -91,6 +110,7 @@ function harness(options = {}) {
     handle(callback) { handler = callback; }, url() { return currentURL; },
     type(value) { node("prompt").value = value; node("prompt").fire("input"); },
     async tick() { for (const [id, callback] of [...timers]) { timers.delete(id); callback(); } await flush(); },
+    async advance(ms) { elapsed += ms; for (const callback of intervals) callback(); await flush(); },
   };
 }
 
@@ -277,4 +297,358 @@ test("keyboard submission ignores composition and locks a single pending request
   assert.equal(h.calls.filter((item) => item.url === "/api/jobs" && item.init.method === "POST").length, 1);
   delayed.resolve(h.response(job("new"), 201)); await flush();
   assert.equal(new URL(h.url()).searchParams.get("task"), "new");
+});
+
+const instant = "2026-01-01T00:00:00Z";
+const canonical = (value) => Array.isArray(value) ? value.map(canonical) : value && typeof value === "object"
+  ? Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])])) : value;
+function reviewFixture(id = "A", project = "alpha") {
+  const bundle = {schema_version: 1, job_id: id, project_id: project, scan_event_id: 5,
+    diff: {base_commit: "a".repeat(40), truncated: false, files: [{path: "src/example.txt", previous_path: null,
+      status: "modified", patch: "--- a/src/example.txt\n+++ b/src/example.txt\n@@ -1 +1 @@\n-old\n+new λ\n", summary: null}]},
+    risks: ["No test run for this frozen snapshot."], verification: [{outcome: "passed", created_at: instant,
+      command_args: ["python", "-m", "pytest"], exit_code: 0, duration_ms: 15}]};
+  const bundle_hash = crypto.createHash("sha256").update(JSON.stringify(canonical(bundle))).digest("hex");
+  const snapshot = {job_id: id, bundle_hash, bundle};
+  const approval = {approval_id: `permission-${id}`, bundle_hash, expires_at: "2026-01-01T00:15:00Z",
+    state: "pending", decision: null, decided_at: null, event_id: 6};
+  const status = {job_id: id, project_id: project, job_state: "waiting_approval", bundle_hash,
+    review_current: true, server_time: instant, approval};
+  return {snapshot, approval, status};
+}
+async function reviewHarness({pending = true, url, id = "A", project = "alpha"} = {}) {
+  const f = reviewFixture(id, project), records = new Map([[id, f]]);
+  if (!pending) { f.status.approval = null; f.status.job_state = "review_ready"; }
+  const h = harness({jobs: [{...job(id, project), state: f.status.job_state}, job("B"), job("C", "beta")], url});
+  let custom = null;
+  h.handle((url, init) => {
+    const result = custom?.(url, init);
+    if (result !== undefined) return result;
+    const task = decodeURIComponent(url.split("/")[3]), item = records.get(task);
+    if (item && url.endsWith("/approval") && init.method === "GET") return h.response(structuredClone(item.status));
+    if (item && url.endsWith("/review-bundle") && init.method === "GET") return h.response(structuredClone(item.snapshot));
+  });
+  await flush(); if (!url) await h.clickTask(id);
+  return {...h, ...f, records, intercept(callback) { custom = callback; }};
+}
+const writes = (h) => h.calls.filter((call) => call.init.method === "POST");
+const decisionBody = (h) => JSON.parse(writes(h).at(-1).init.body);
+const enableDecision = async (h) => { await h.node("review-view").fire("click"); };
+const assertLocked = (h) => {
+  for (const name of ["approve", "changes", "reject"]) assert.equal(h.node(`review-${name}`).disabled, true);
+};
+
+for (const failed of [false, true]) {
+  test(`review waits for digest completion and ${failed ? "locks on failure" : "then enables viewed decisions"}`, async (t) => {
+    const gate = deferred(), f = reviewFixture(); let started = false;
+    t.after(() => gate.resolve());
+    const h = harness({jobs: [{...job("A"), state: "waiting_approval"}], digest: async (...args) => {
+      started = true; await gate.promise; return crypto.webcrypto.subtle.digest(...args);
+    }});
+    h.handle((url) => {
+      if (url.endsWith("/approval")) return h.response(structuredClone(f.status));
+      if (url.endsWith("/review-bundle")) return h.response(structuredClone(f.snapshot));
+    });
+    await flush();
+    h.node("task-list").children.find((item) => item.dataset.job === "A").fire("click");
+    await new Promise(setImmediate);
+    assert.equal(started, true); assertLocked(h);
+    assert.match(h.node("review-message").textContent, /Reading stored review state/);
+    let settled = false;
+    const draining = flush().then(() => { settled = true; });
+    await new Promise(setImmediate);
+    assert.equal(settled, false);
+    if (failed) gate.reject(new Error("Synthetic digest failure."));
+    else gate.resolve();
+    await draining;
+    if (failed) {
+      assertLocked(h);
+      assert.equal(h.node("review-content").hidden, true);
+      assert.match(h.node("review-error").textContent, /Synthetic digest failure/);
+    } else {
+      assert.equal(h.node("review-id").textContent, f.approval.approval_id);
+      await enableDecision(h);
+      assert.equal(h.node("review-approve").disabled, false);
+    }
+    assert.equal(writes(h).length, 0);
+    assert.equal(pendingDigests.size, 0);
+  });
+}
+
+test("loading and URL reload are read only; original ID, scope and expiry precede every decision", async () => {
+  const h = await reviewHarness({url: "http://localhost/?project=alpha&task=A"});
+  assert.equal(writes(h).length, 0); assertLocked(h);
+  assert.equal(h.node("review-id").textContent, "permission-A");
+  assert.equal(h.node("review-hash").textContent, h.snapshot.bundle_hash);
+  assert.match(h.node("review-scope").textContent, /Project alpha · Task A · 1 changed file/);
+  assert.match(h.node("review-expiry").textContent, /Original decision deadline/);
+  assert.equal(h.node("review-diff").hidden, true);
+  await enableDecision(h);
+  assert.equal(h.node("review-approve").disabled, false);
+  assert.equal(h.node("review-view")["aria-expanded"], "true");
+  await h.node("review-reload").fire("click"); assert.equal(writes(h).length, 0);
+  assert.equal(h.node("review-id").textContent, "permission-A");
+});
+
+for (const [name, decision, target] of [["approve", "approved", "approved"],
+  ["changes", "changes_requested", "running"], ["reject", "rejected", "rejected"]]) {
+  test(`${decision} sends one exact decision and never promotes or starts a provider`, async () => {
+    const h = await reviewHarness(); await enableDecision(h); const delayed = deferred();
+    h.intercept((url, init) => url === "/api/approvals/permission-A" && init.method === "POST" ? delayed.promise : undefined);
+    const pending = h.node(`review-${name}`).fire("click");
+    h.node(`review-${name}`).fire("click"); h.node("review-request").fire("click"); assertLocked(h);
+    assert.equal(writes(h).length, 1);
+    assert.deepEqual(decisionBody(h), {decision, bundle_hash: h.snapshot.bundle_hash});
+    h.approval.state = "decided"; h.approval.decision = decision; h.approval.decided_at = instant;
+    h.status.job_state = target; h.jobs.get("A").state = target;
+    delayed.resolve(h.response({job_id: "A", approval_id: "permission-A", bundle_hash: h.snapshot.bundle_hash, decision}));
+    await pending; await flush(); assertLocked(h);
+    assert.match(h.node("review-decision").textContent, new RegExp(decision.replaceAll("_", " ")));
+    assert.equal(writes(h).length, 1);
+    assert.equal(h.calls.some((call) => /promote|native|\/start|\/resume/.test(call.url)), false);
+  });
+}
+
+test("decision preparation is explicit, requires viewed evidence and recovers its stored identity", async () => {
+  const h = await reviewHarness({pending: false});
+  await h.node("review-request").fire("click"); assert.equal(writes(h).length, 0);
+  await enableDecision(h);
+  h.intercept((url, init) => {
+    if (url.endsWith("/approval-request") && init.method === "POST") {
+      h.status.approval = h.approval; h.status.job_state = "waiting_approval";
+      h.jobs.get("A").state = "waiting_approval";
+      return h.response({job_id: "A", ...h.approval});
+    }
+  });
+  await h.node("review-request").fire("click"); await flush();
+  assert.deepEqual(decisionBody(h), {bundle_hash: h.snapshot.bundle_hash});
+  assert.equal(h.node("review-id").textContent, "permission-A");
+  assert.equal(h.node("review-approve").disabled, false);
+  await h.node("review-reload").fire("click"); assert.equal(writes(h).length, 1);
+});
+
+test("pending approval expires at its original deadline without waiting for a refresh", async () => {
+  const h = await reviewHarness(); await enableDecision(h);
+  await h.advance(900000); assertLocked(h);
+  assert.match(h.node("review-message").textContent, /expired/);
+  await h.node("review-approve").fire("click"); assert.equal(writes(h).length, 0);
+});
+
+test("slow review reads cannot extend the approval deadline", async () => {
+  const h = await reviewHarness(), delayed = deferred();
+  h.intercept((url) => url.endsWith("/review-bundle") ? delayed.promise : undefined);
+  const loading = h.node("review-reload").fire("click"); await flush(); await h.advance(900000);
+  delayed.resolve(h.response(h.snapshot)); await loading; await enableDecision(h); assertLocked(h);
+  assert.match(h.node("review-message").textContent, /expired/);
+});
+
+for (const unreadable of [false, true]) {
+  test(`a committed decision with ${unreadable ? "unreadable" : "lost"} response reconciles through GET without retry`, async () => {
+    const h = await reviewHarness(); await enableDecision(h);
+    h.intercept((url, init) => {
+      if (url === "/api/approvals/permission-A" && init.method === "POST") {
+        h.approval.state = "decided"; h.approval.decision = "approved"; h.approval.decided_at = instant;
+        h.status.job_state = "approved"; h.jobs.get("A").state = "approved";
+        return unreadable ? {ok: true, json: async () => { throw new Error("broken JSON"); }}
+          : Promise.reject(new Error("transport failed"));
+      }
+    });
+    await h.node("review-approve").fire("click"); await flush(); assertLocked(h);
+    assert.match(h.node("review-decision").textContent, /approved/);
+    assert.equal(writes(h).length, 1);
+    assert.equal(h.node("review-error").hidden, true);
+    assert.equal(h.calls.at(-1).init.method, "GET");
+  });
+}
+
+test("unconfirmed writes stay locked across navigation, reload and alternate decision clicks", async () => {
+  const h = await reviewHarness(); await enableDecision(h);
+  h.intercept((url, init) => init.method === "POST" ? Promise.reject(new Error("transport failed")) : undefined);
+  await h.node("review-approve").fire("click"); await flush();
+  await h.clickTask("B"); await h.clickTask("A"); await enableDecision(h);
+  await h.node("review-reload").fire("click"); assertLocked(h);
+  await h.node("review-reject").fire("click"); assert.equal(writes(h).length, 1);
+  assert.match(h.node("review-error").textContent, /may already have succeeded/);
+});
+
+test("stale worktree conflict does not regenerate a snapshot or reenable the same approval", async () => {
+  const h = await reviewHarness(); await enableDecision(h);
+  h.intercept((url, init) => init.method === "POST" ? h.response({detail: "Worktree content changed after review."}, 409) : undefined);
+  await h.node("review-approve").fire("click"); await h.node("review-reload").fire("click"); assertLocked(h);
+  assert.match(h.node("review-error").textContent, /changed after review/);
+  assert.equal(writes(h).length, 1);
+  assert.equal(writes(h)[0].url, "/api/approvals/permission-A");
+});
+
+test("historical review requires explicit new snapshot preparation and viewing before another decision", async () => {
+  const h = await reviewHarness(), fresh = reviewFixture();
+  fresh.snapshot.bundle.scan_event_id = 20;
+  fresh.snapshot.bundle_hash = crypto.createHash("sha256").update(JSON.stringify(canonical(fresh.snapshot.bundle))).digest("hex");
+  fresh.status.bundle_hash = fresh.snapshot.bundle_hash; fresh.status.approval = null; fresh.status.job_state = "review_ready";
+  h.status.review_current = false; h.status.job_state = "review_ready";
+  h.approval.state = "decided"; h.approval.decision = "changes_requested"; h.approval.decided_at = instant;
+  await h.node("review-reload").fire("click"); await enableDecision(h); assertLocked(h);
+  assert.match(h.node("review-message").textContent, /Historical review/);
+  assert.equal(h.node("review-prepare").hidden, false);
+  h.intercept((url, init) => {
+    if (url.endsWith("/review-bundle") && init.method === "POST") {
+      h.records.set("A", fresh); return h.response(fresh.snapshot);
+    }
+  });
+  await h.node("review-prepare").fire("click"); await flush();
+  assert.equal(writes(h).length, 1); assert.deepEqual(decisionBody(h), {});
+  assert.equal(h.node("review-id").textContent, "Not requested");
+  assert.equal(h.node("review-diff").hidden, true); assert.equal(h.node("review-request").disabled, true);
+  await enableDecision(h); assert.equal(h.node("review-request").disabled, false);
+});
+
+test("late A to B to A approval reads cannot overwrite fresh review identity", async () => {
+  const h = await reviewHarness(), old = deferred(); let intercepted = false;
+  h.intercept((url) => {
+    if (url.endsWith("/approval") && !intercepted) { intercepted = true; return old.promise; }
+  });
+  const loading = h.node("review-reload").fire("click"); await flush();
+  await h.clickTask("B"); h.approval.approval_id = "fresh-A"; await h.clickTask("A"); await enableDecision(h);
+  old.resolve(h.response({...h.status, approval: {...h.approval, approval_id: "obsolete-A"}}));
+  await loading; await flush();
+  assert.equal(h.node("review-id").textContent, "fresh-A");
+  assert.equal(h.node("review-approve").disabled, false);
+});
+
+test("a pending write stays task scoped while navigation changes and reconciles before reenabling", async () => {
+  const h = await reviewHarness(); await enableDecision(h); const delayed = deferred();
+  h.intercept((url, init) => init.method === "POST" ? delayed.promise : undefined);
+  const action = h.node("review-approve").fire("click");
+  await h.clickTask("B"); await h.clickTask("A"); assertLocked(h);
+  await h.node("review-reject").fire("click"); assert.equal(writes(h).length, 1);
+  h.approval.state = "decided"; h.approval.decision = "approved"; h.approval.decided_at = instant;
+  h.status.job_state = "approved";
+  delayed.resolve(h.response({job_id: "A", bundle_hash: h.snapshot.bundle_hash, approval_id: "permission-A", decision: "approved"}));
+  await action; await flush(); assertLocked(h);
+  assert.equal(h.node("review-id").textContent, "permission-A");
+  assert.match(h.node("review-decision").textContent, /approved/);
+});
+
+for (const corruption of ["task", "project", "hash", "content", "status", "expiry", "decision"]) {
+  test(`malformed ${corruption} evidence fails closed without a mutation`, async () => {
+    const h = await reviewHarness(); await enableDecision(h);
+    h.intercept((url) => {
+      if (url.endsWith("/approval") && ["status", "expiry", "decision"].includes(corruption)) {
+        const data = structuredClone(h.status);
+        if (corruption === "status") data.project_id = "beta";
+        if (corruption === "expiry") data.approval.expires_at = "not a date";
+        if (corruption === "decision") data.approval.decision = "approved";
+        return h.response(data);
+      }
+      if (url.endsWith("/review-bundle")) {
+        const data = structuredClone(h.snapshot);
+        if (corruption === "task") data.job_id = "B";
+        if (corruption === "project") data.bundle.project_id = "beta";
+        if (corruption === "hash") data.bundle_hash = "0".repeat(64);
+        if (corruption === "content") data.bundle.diff.files[0].patch = "+unexpected change";
+        return h.response(data);
+      }
+    });
+    await h.node("review-reload").fire("click"); assertLocked(h);
+    await h.node("review-approve").fire("click"); assert.equal(writes(h).length, 0);
+    assert.equal(h.node("review-content").hidden, true);
+    assert.equal(h.node("review-error").hidden, false);
+  });
+}
+
+test("diff, paths, risks and verification arguments render as text, including incomplete content", async () => {
+  const h = await reviewHarness(), marker = '<img src=x onerror="unsafe()">';
+  h.snapshot.bundle.diff.files[0].path = marker;
+  h.snapshot.bundle.diff.files[0].patch = marker;
+  h.snapshot.bundle.diff.files.push({path: "image.bin", previous_path: null, status: "added", patch: null, summary: "Binary content not displayed."});
+  h.snapshot.bundle.diff.truncated = true;
+  h.snapshot.bundle.risks = [marker]; h.snapshot.bundle.verification[0].command_args = [marker];
+  h.snapshot.bundle_hash = crypto.createHash("sha256").update(JSON.stringify(canonical(h.snapshot.bundle))).digest("hex");
+  h.status.bundle_hash = h.approval.bundle_hash = h.snapshot.bundle_hash;
+  h.approval.approval_id = "permission-safe-rendering";
+  await h.node("review-reload").fire("click"); await enableDecision(h);
+  assert.equal(h.node("review-patches").children[0].children[1].textContent, marker);
+  assert.match(h.node("review-files").children[0].textContent, /<img/);
+  assert.equal(h.node("review-risks").children[0].textContent, marker);
+  assert.match(h.node("review-risks").children[1].textContent, /incomplete/);
+  assert.equal(h.node("review-checks").children[0].children[2].textContent, JSON.stringify([marker]));
+  assert.match(h.node("review-patches").children[1].children[1].textContent, /Binary content/);
+  assert.equal(writes(h).length, 0);
+});
+
+test("empty review is prepared only by an explicit click, never by opening or refreshing", async () => {
+  const h = await reviewHarness({pending: false});
+  h.status.bundle_hash = null; h.status.review_current = false;
+  await h.node("review-reload").fire("click");
+  assert.equal(writes(h).length, 0); assertLocked(h);
+  assert.equal(h.node("review-prepare").disabled, false);
+  h.intercept((url, init) => {
+    if (url.endsWith("/review-bundle") && init.method === "POST") {
+      h.status.bundle_hash = h.snapshot.bundle_hash; h.status.review_current = true;
+      return h.response(h.snapshot);
+    }
+  });
+  await h.node("review-prepare").fire("click"); await flush();
+  assert.equal(writes(h).length, 1);
+  assert.equal(h.node("review-request").disabled, true);
+  assert.equal(h.node("review-id").textContent, "Not requested");
+});
+
+test("lost approval preparation response recovers one original ID without resubmission", async () => {
+  const h = await reviewHarness({pending: false}); await enableDecision(h);
+  h.intercept((url, init) => {
+    if (url.endsWith("/approval-request") && init.method === "POST") {
+      h.status.approval = h.approval; h.status.job_state = "waiting_approval";
+      h.jobs.get("A").state = "waiting_approval";
+      return Promise.reject(new Error("transport failed"));
+    }
+  });
+  await h.node("review-request").fire("click"); await flush();
+  assert.equal(writes(h).length, 1);
+  assert.equal(h.node("review-id").textContent, "permission-A");
+  assert.equal(h.node("review-approve").disabled, false);
+  assert.equal(h.node("review-error").hidden, true);
+});
+
+test("immutable approval expiry cannot be silently extended in a later response", async () => {
+  const h = await reviewHarness(); await enableDecision(h);
+  h.approval.expires_at = "2026-01-01T00:45:00Z";
+  await h.node("review-reload").fire("click"); assertLocked(h);
+  assert.match(h.node("review-error").textContent, /identity changed/);
+  assert.equal(writes(h).length, 0);
+});
+
+test("expired authority and missing verification are displayed honestly without creating new requests", async () => {
+  const h = await reviewHarness();
+  h.approval.state = "expired"; h.status.server_time = h.approval.expires_at;
+  const fresh = reviewFixture(); fresh.snapshot.bundle.verification = [];
+  fresh.snapshot.bundle_hash = crypto.createHash("sha256").update(JSON.stringify(canonical(fresh.snapshot.bundle))).digest("hex");
+  fresh.status.bundle_hash = fresh.approval.bundle_hash = fresh.snapshot.bundle_hash;
+  fresh.approval.approval_id = "permission-expired"; fresh.approval.state = "expired";
+  fresh.status.server_time = fresh.approval.expires_at; h.records.set("A", fresh);
+  await h.node("review-reload").fire("click"); await enableDecision(h); assertLocked(h);
+  assert.match(h.node("review-message").textContent, /does not extend/);
+  assert.match(h.node("review-checks").children[0].textContent, /not proof that tests passed/);
+  assert.equal(h.node("review-request").hidden, true);
+  assert.equal(writes(h).length, 0);
+});
+
+test("refresh preserves frozen diff nodes and an explicitly collapsed diff", async () => {
+  const h = await reviewHarness(); await enableDecision(h);
+  const patch = h.node("review-patches").children[0];
+  await h.node("review-view").fire("click");
+  assert.equal(h.node("review-diff").hidden, true);
+  await h.node("review-reload").fire("click");
+  assert.equal(h.node("review-diff").hidden, true);
+  assert.equal(h.node("review-patches").children[0], patch);
+  assert.equal(h.node("review-view")["aria-expanded"], "false");
+});
+
+test("switching to a task without review clears the prior disclosure and evidence", async () => {
+  const h = await reviewHarness(); await enableDecision(h);
+  await h.clickTask("B"); assertLocked(h);
+  assert.equal(h.node("review-content").hidden, true);
+  assert.equal(h.node("review-view").textContent, "View unified diff");
+  assert.equal(h.node("review-view")["aria-expanded"], "false");
+  assert.equal(h.node("review-patches").children.length, 0);
 });

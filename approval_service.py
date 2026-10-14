@@ -76,6 +76,65 @@ class ApprovalService:
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
         self._scanner = SecretScanner()
 
+    def read(self, job_id: str) -> dict[str, object]:
+        """Recover original review authority and decisions without checking out files."""
+        try:
+            review = self._workflow.read_review(job_id)
+        except (JobNotFoundError, ApprovalValidationError) as error:
+            raise ApprovalMissingError("Job does not exist.") from error
+        except ApprovalWorkflowConflictError as error:
+            raise ApprovalStateError(str(error)) from error
+        except DatabaseError as error:
+            raise ApprovalUnavailableError("Approval state is unavailable.") from error
+        now = self._clock()
+        bundle_hash = None if review.bundle is None else review.bundle.payload_hash
+        result: dict[str, object] = {
+            "job_id": review.job.id,
+            "project_id": review.job.project_id,
+            "job_state": review.job.state.value,
+            "bundle_hash": bundle_hash,
+            "review_current": review.current,
+            "server_time": now.isoformat(),
+            "approval": None,
+        }
+        approval = review.approval
+        if approval is None:
+            return result
+        if review.requested is None or review.bundle is None:
+            raise ApprovalStateError("Approval request binding is missing.")
+        binding = self._event_binding(review.requested, approval)
+        if binding != self._binding(job_id, review.bundle.scan_event_id, bundle_hash):
+            raise ApprovalStateError("Approval does not match the stored review.")
+        decision = None if approval.decision is None else approval.decision.value
+        if approval.decision is not None:
+            target = {
+                ApprovalDecision.APPROVED: JobState.APPROVED,
+                ApprovalDecision.REJECTED: JobState.REJECTED,
+                ApprovalDecision.CHANGES_REQUESTED: JobState.RUNNING,
+            }[approval.decision]
+            if review.decided is None or review.decided.payload != {
+                "approval_id": approval.id,
+                "decision": decision,
+                "bundle_hash": bundle_hash,
+                "job_state": target.value,
+                "channel": approval.channel,
+            }:
+                raise ApprovalStateError("Approval decision event is inconsistent.")
+        result["approval"] = {
+            "approval_id": approval.id,
+            "bundle_hash": bundle_hash,
+            "expires_at": approval.expires_at.isoformat(),
+            "state": "decided"
+            if decision
+            else "expired"
+            if approval.expires_at <= now
+            else "pending",
+            "decision": decision,
+            "decided_at": approval.decided_at,
+            "event_id": (review.decided or review.requested).id,
+        }
+        return result
+
     async def request(self, job_id: str, body: object) -> dict[str, object]:
         values = self._body(body, {"bundle_hash"})
         viewed_hash = self._hash(values["bundle_hash"])
@@ -270,7 +329,10 @@ class ApprovalService:
             cls._hash(bundle_hash)
         except ApprovalInputError as error:
             raise ApprovalStateError("Approval request binding is invalid.") from error
-        return cls._binding(approval.job_id, scan_event_id, bundle_hash)
+        binding = cls._binding(approval.job_id, scan_event_id, bundle_hash)
+        if ApprovalRepository._payload_hash(binding) != approval.payload_hash:
+            raise ApprovalStateError("Approval request binding is invalid.")
+        return binding
 
     @staticmethod
     def _request_response(result: ApprovalWorkflowRecord, bundle_hash: str) -> dict[str, object]:

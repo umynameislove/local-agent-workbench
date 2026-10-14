@@ -1,5 +1,228 @@
 "use strict";
 
+window.WorkbenchReview = ({request, onChange}) => {
+  const ui = Object.fromEntries([
+    "review", "review-heading", "review-message", "review-error", "review-content", "review-scope",
+    "review-hash", "review-base", "review-id", "review-expiry", "review-decision", "review-files",
+    "review-checks", "review-risks", "review-diff", "review-patches", "review-view", "review-prepare",
+    "review-request", "review-approve", "review-changes", "review-reject", "review-reload",
+  ].map((id) => [id, document.getElementById(id)]));
+  const decisions = new Set(["approved", "changes_requested", "rejected"]);
+  const busy = new Set(), uncertain = new Map(), deadlines = new Map();
+  let job = null, generation = 0, reading = 0, loading = false;
+  let status = null, bundle = null, viewed = null, renderedHash = null, deadline = 0, error = "";
+  const hash = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+  const text = (value) => typeof value === "string";
+  const date = (value) => text(value) && Number.isFinite(Date.parse(value));
+  const label = (value) => String(value).replaceAll("_", " ");
+  const current = (id, epoch, read = reading) => job?.id === id && generation === epoch && read === reading;
+  const active = () => status?.review_current && bundle && status.bundle_hash === bundle.bundle_hash;
+  const available = () => active() && !loading && !busy.has(job.id) && !uncertain.has(job.id);
+  const canPrepare = () => status && status.job_state === "review_ready" && !active();
+  const canRequest = () => available() && status.job_state === "review_ready" && !status.approval
+    && viewed === bundle.bundle_hash;
+  const canDecide = () => available() && status.job_state === "waiting_approval"
+    && status.approval?.state === "pending" && performance.now() < deadline
+    && viewed === bundle.bundle_hash;
+  const element = (tag, value, className = "") => {
+    const node = document.createElement(tag); node.textContent = value; node.className = className; return node;
+  };
+  const renderControls = () => {
+    const held = job && uncertain.get(job.id);
+    const approval = status?.approval;
+    const pendingExpired = approval?.state === "pending" && performance.now() >= deadline;
+    ui["review-prepare"].hidden = !canPrepare();
+    ui["review-prepare"].disabled = loading || !job || busy.has(job.id) || Boolean(held);
+    ui["review-request"].hidden = !active() || Boolean(approval);
+    ui["review-request"].disabled = !canRequest();
+    ui["review-view"].disabled = !bundle || loading;
+    ui["review-reload"].disabled = !job || loading || busy.has(job.id);
+    for (const name of ["approve", "changes", "reject"]) ui[`review-${name}`].disabled = !canDecide();
+    const alert = error || held?.message || "";
+    if (ui["review-error"].textContent !== alert) ui["review-error"].textContent = alert;
+    ui["review-error"].hidden = !ui["review-error"].textContent;
+    let message = "No frozen review is available for this task.";
+    if (loading && !status) message = "Reading stored review state…";
+    else if (job && busy.has(job.id)) message = "Recording one action. Decisions are locked until state is reconciled.";
+    else if (status && bundle && !status.review_current) message = "Historical review. A newer review round exists. Prepare its snapshot explicitly.";
+    else if (approval?.decision) message = `Recorded decision: ${label(approval.decision)}. No patch was applied by this review panel.`;
+    else if (approval?.state === "expired" || pendingExpired) message = "This approval has expired. Reload does not extend it. Operator recovery is required.";
+    else if (active() && viewed !== bundle.bundle_hash) message = "View the unified diff for this exact snapshot before preparing or recording a decision.";
+    else if (active() && !approval) message = "Prepare a decision to obtain its stored approval ID and original expiry.";
+    else if (active()) message = "Review the ID, scope and expiry below. Each decision is checked against the live worktree.";
+    else if (canPrepare()) message = "Review readiness is recorded. Prepare a frozen snapshot; this does not request approval.";
+    if (ui["review-message"].textContent !== message) ui["review-message"].textContent = message;
+  };
+  const renderEvidence = () => {
+    ui.review.hidden = !job;
+    ui["review-content"].hidden = !bundle;
+    if (!bundle) {
+      renderedHash = null; ui["review-diff"].hidden = true;
+      ui["review-view"].textContent = "View unified diff";
+      ui["review-view"].setAttribute("aria-expanded", "false");
+      for (const name of ["files", "checks", "risks", "patches"]) ui[`review-${name}`].replaceChildren();
+      renderControls(); return;
+    }
+    const evidence = bundle.bundle, approval = status.approval;
+    const count = evidence.diff.files.length;
+    ui["review-scope"].textContent = `Project ${job.project_id} · Task ${job.id} · ${count} changed ${count === 1 ? "file" : "files"} · This snapshot only`;
+    ui["review-hash"].textContent = bundle.bundle_hash;
+    ui["review-base"].textContent = evidence.diff.base_commit;
+    ui["review-id"].textContent = approval?.approval_id || "Not requested";
+    ui["review-expiry"].textContent = approval ? `${new Date(approval.expires_at).toLocaleString()} · Original decision deadline`
+      : "Starts only when you prepare a decision";
+    ui["review-decision"].textContent = approval?.decision ? `${label(approval.decision)} · ${new Date(approval.decided_at).toLocaleString()}` : "No recorded decision";
+    if (renderedHash === bundle.bundle_hash) { renderControls(); return; }
+    renderedHash = bundle.bundle_hash;
+    for (const name of ["files", "checks", "risks", "patches"]) ui[`review-${name}`].replaceChildren();
+    ui["review-diff"].hidden = true;
+    ui["review-view"].textContent = "View unified diff";
+    ui["review-view"].setAttribute("aria-expanded", "false");
+    for (const file of evidence.diff.files) {
+      const title = `${label(file.status)} · ${file.path}${file.previous_path ? ` · Previously ${file.previous_path}` : ""}`;
+      ui["review-files"].append(element("li", title));
+      const article = document.createElement("article"); article.className = "review-file";
+      article.append(element("h4", title));
+      const patch = element("pre", file.patch === null ? file.summary || "Content is not displayed. Inspect this file separately before approving." : file.patch);
+      patch.tabIndex = 0; patch.setAttribute("aria-label", `Unified diff for ${file.path}`);
+      article.append(patch); ui["review-patches"].append(article);
+    }
+    if (evidence.diff.files.length === 0) ui["review-files"].append(element("li", "No changed files in this snapshot."));
+    for (const check of evidence.verification) {
+      const item = document.createElement("li");
+      item.append(element("strong", label(check.outcome)),
+        element("p", `Exit ${check.exit_code ?? "not recorded"} · ${check.duration_ms} ms · ${new Date(check.created_at).toLocaleString()}`),
+        element("code", JSON.stringify(check.command_args)));
+      ui["review-checks"].append(item);
+    }
+    if (!evidence.verification.length) ui["review-checks"].append(element("li", "No verification runs are recorded. Review is not proof that tests passed."));
+    for (const risk of evidence.risks) ui["review-risks"].append(element("li", risk));
+    if (evidence.diff.truncated) ui["review-risks"].append(element("li", "Diff display is incomplete. Some content was omitted by the capture limits."));
+    if (!evidence.risks.length && !evidence.diff.truncated) ui["review-risks"].append(element("li", "No recorded warnings. This is not a guarantee of correctness."));
+    if (viewed === bundle.bundle_hash) toggleDiff(true);
+    renderControls();
+  };
+  const validStatus = (data, expected) => {
+    if (!data || data.job_id !== expected.id || data.project_id !== expected.project_id
+      || !text(data.job_state) || typeof data.review_current !== "boolean" || !date(data.server_time)
+      || !(data.bundle_hash === null || hash(data.bundle_hash)) || !(data.approval === null || typeof data.approval === "object")) return false;
+    const a = data.approval;
+    return !a || (text(a.approval_id) && a.approval_id.length > 0 && a.approval_id.length <= 128
+      && a.bundle_hash === data.bundle_hash && hash(a.bundle_hash) && date(a.expires_at)
+      && ["pending", "expired", "decided"].includes(a.state)
+      && (a.state === "decided" ? decisions.has(a.decision) && date(a.decided_at) : a.decision === null && a.decided_at === null));
+  };
+  const validBundle = (data, expected, boundHash) => {
+    const b = data?.bundle, diff = b?.diff;
+    return data?.job_id === expected.id && data.bundle_hash === boundHash
+      && b?.schema_version === 1 && b.job_id === expected.id && b.project_id === expected.project_id
+      && diff && text(diff.base_commit) && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(diff.base_commit)
+      && typeof diff.truncated === "boolean" && Array.isArray(diff.files)
+      && diff.files.every((f) => f && text(f.path) && text(f.status) && (f.previous_path === null || text(f.previous_path))
+        && (f.patch === null || text(f.patch)) && (f.summary === null || text(f.summary)))
+      && Array.isArray(b.risks) && b.risks.every(text) && Array.isArray(b.verification)
+      && b.verification.every((v) => v && text(v.outcome) && date(v.created_at)
+        && Array.isArray(v.command_args) && v.command_args.every(text) && Number.isFinite(v.duration_ms)
+        && (v.exit_code === null || Number.isInteger(v.exit_code)));
+  };
+  const bundleDigest = async (value) => {
+    const canonical = (item) => Array.isArray(item) ? item.map(canonical) : item && typeof item === "object"
+      ? Object.fromEntries(Object.keys(item).sort().map((key) => [key, canonical(item[key])])) : item;
+    const bytes = new TextEncoder().encode(JSON.stringify(canonical(value)));
+    return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  };
+  const reconcile = (data) => {
+    const held = uncertain.get(data.job_id);
+    if (!held) return;
+    const a = data.approval;
+    if ((held.hash && data.bundle_hash && held.hash !== data.bundle_hash)
+      || (held.kind === "prepare" && data.review_current)
+      || (held.kind === "request" && a && a.bundle_hash === held.hash)
+      || (held.kind === "decision" && a?.approval_id === held.id && a.decision)) uncertain.delete(data.job_id);
+  };
+  const load = async () => {
+    if (!job || loading || busy.has(job.id)) return;
+    const expected = job, epoch = generation, read = ++reading, started = performance.now();
+    loading = true; error = ""; renderControls();
+    try {
+      const data = await request(`/api/jobs/${encodeURIComponent(expected.id)}/approval`);
+      if (!current(expected.id, epoch, read)) return;
+      if (!validStatus(data, expected)) throw new Error("Stored approval response is unreadable. Decisions remain locked.");
+      const snapshot = data.bundle_hash ? await request(`/api/jobs/${encodeURIComponent(expected.id)}/review-bundle`) : null;
+      if (!current(expected.id, epoch, read)) return;
+      if (snapshot && (!validBundle(snapshot, expected, data.bundle_hash)
+        || await bundleDigest(snapshot.bundle) !== data.bundle_hash)) throw new Error("Review identity changed or its evidence is unreadable. Reload before deciding.");
+      if (!current(expected.id, epoch, read)) return;
+      if (bundle?.bundle_hash !== snapshot?.bundle_hash) viewed = null;
+      const a = data.approval, known = a && deadlines.get(a.approval_id);
+      if (known && (known.expires !== a.expires_at || known.hash !== a.bundle_hash)) throw new Error("Stored approval identity changed. Decisions remain locked.");
+      deadline = a ? Math.min(known?.deadline ?? Infinity, started + Date.parse(a.expires_at) - Date.parse(data.server_time)) : 0;
+      if (a) deadlines.set(a.approval_id, {expires: a.expires_at, hash: a.bundle_hash, deadline});
+      status = data; bundle = snapshot;
+      reconcile(data);
+    } catch (failure) {
+      if (current(expected.id, epoch, read)) { status = null; bundle = null; viewed = null; error = failure.message; }
+    } finally {
+      if (current(expected.id, epoch, read)) { loading = false; renderEvidence(); }
+    }
+  };
+  const toggleDiff = (open = ui["review-diff"].hidden) => {
+    if (!bundle || loading) return;
+    ui["review-diff"].hidden = !open;
+    ui["review-view"].textContent = open ? "Hide unified diff" : "View unified diff";
+    ui["review-view"].setAttribute("aria-expanded", String(open));
+    if (open) viewed = bundle.bundle_hash;
+    renderControls();
+  };
+  const perform = async (kind, decision) => {
+    if (!job || loading || busy.has(job.id) || uncertain.has(job.id)) return;
+    if (kind === "prepare" ? !canPrepare() : kind === "request" ? !canRequest() : !canDecide() || !decisions.has(decision)) return;
+    const expected = job, epoch = generation, boundHash = bundle?.bundle_hash, id = status.approval?.approval_id;
+    const prefix = `/api/jobs/${encodeURIComponent(expected.id)}`;
+    const path = kind === "prepare" ? `${prefix}/review-bundle` : kind === "request" ? `${prefix}/approval-request` : `/api/approvals/${encodeURIComponent(id)}`;
+    const payload = kind === "prepare" ? {} : kind === "request" ? {bundle_hash: boundHash} : {decision, bundle_hash: boundHash};
+    busy.add(expected.id); error = ""; renderControls();
+    try {
+      const data = await request(path, payload);
+      if (data?.job_id !== expected.id || !hash(data.bundle_hash)
+        || (kind !== "prepare" && data.bundle_hash !== boundHash)
+        || (kind === "request" && (!text(data.approval_id) || !date(data.expires_at) || data.state !== "pending"))
+        || (kind === "decision" && (data.approval_id !== id || data.decision !== decision))) {
+        throw new Error("Action response is unreadable. It may already have succeeded. Reload stored state; do not resubmit.");
+      }
+    } catch (failure) {
+      uncertain.set(expected.id, {kind: failure.status === 409 ? "conflict" : kind, hash: boundHash, id,
+        message: `${failure.message} Decisions are locked until stored state confirms the outcome.`});
+      if (current(expected.id, epoch)) error = "";
+    } finally {
+      busy.delete(expected.id);
+      if (job?.id === expected.id && job.project_id === expected.project_id) { await load(); onChange(); }
+    }
+  };
+  const select = (selected) => {
+    generation += 1; reading += 1; job = selected; loading = false;
+    status = null; bundle = null; viewed = null; renderedHash = null; deadline = 0; error = ""; renderEvidence();
+  };
+  ui["review-view"].addEventListener("click", () => toggleDiff());
+  ui["review-prepare"].addEventListener("click", () => perform("prepare"));
+  ui["review-request"].addEventListener("click", () => perform("request"));
+  for (const [name, value] of [["approve", "approved"], ["changes", "changes_requested"], ["reject", "rejected"]]) {
+    ui[`review-${name}`].addEventListener("click", () => perform("decision", value));
+  }
+  ui["review-reload"].addEventListener("click", load);
+  setInterval(() => { if (job && status?.approval?.state === "pending") renderControls(); }, 1000);
+  select(null);
+  return {
+    select,
+    update(selected) {
+      if (job?.id !== selected.id || job.project_id !== selected.project_id) select(selected);
+      else job = selected;
+      return load();
+    },
+    focus() { ui["review-heading"].focus(); },
+  };
+};
+
 (() => {
   const $ = (id) => document.getElementById(id);
   const ui = Object.fromEntries([
@@ -41,12 +264,14 @@
     try { data = await response.json(); }
     catch { throw new Error("The backend returned an unreadable response. Refresh state to reconcile the task."); }
     if (!response.ok) {
-      throw new Error(typeof data.detail === "string" ? data.detail : "The request was not accepted. Refresh state before trying again.");
+      const error = new Error(typeof data.detail === "string" ? data.detail : "The request was not accepted. Refresh state before trying again.");
+      error.status = response.status; throw error;
     }
     return data;
   };
   const validJob = (job, project = state.project) => job && typeof job.id === "string"
     && job.project_id === project && typeof job.state === "string" && typeof job.title === "string";
+  const review = window.WorkbenchReview({request, onChange: () => loadDetail()});
   const setURL = () => {
     const url = new URL(location.href);
     url.search = "";
@@ -109,8 +334,11 @@
     if (job.state === "queued" && job.worktree_ready) {
       return ["Worktree is prepared", "Native execution is not connected to this workspace yet. No provider has been started by this UI.", null];
     }
+    if (["review_ready", "waiting_approval", "approved", "rejected"].includes(job.state)) {
+      return ["Inspect the frozen review", "View recorded verification, scope and diff. Decisions stay bound to one stored snapshot.", "review"];
+    }
     if (attentionStates.has(job.state)) {
-      return ["This task needs you", "The recorded state needs operator attention. Review and follow up controls are not connected in this shell yet.", null];
+      return ["This task needs you", "The recorded state needs operator attention. Follow up and provider recovery are not connected in this shell yet.", null];
     }
     return ["Inspect recorded activity", "This view follows durable backend events. It does not start, stop or resume a provider session.", null];
   };
@@ -137,7 +365,7 @@
     for (const button of [ui["next-action"], ui["header-action"]]) {
       button.hidden = !action;
       button.textContent = state.actions.has(state.selected) ? "Working…"
-        : action === "plan" ? "Generate demo plan" : "Create isolated worktree";
+        : action === "plan" ? "Generate demo plan" : action === "review" ? "Inspect review" : "Create isolated worktree";
       button.disabled = state.actions.has(state.selected);
     }
     const editable = state.ready && Boolean(project) && !state.selected && !state.creating;
@@ -185,6 +413,7 @@
       if (!validJob(job) || job.id !== id || typeof job.request !== "string") throw new Error("Task detail is unreadable.");
       state.job = job; state.jobs.set(id, job); renderTask(); renderTasks();
       if (!state.stream) connectStream();
+      review.update(job);
     } catch (error) {
       if (taskEpoch === state.taskEpoch && detailEpoch === state.detailEpoch) tell(error.message);
     }
@@ -240,6 +469,7 @@
     if (id === state.selected && state.job) { loadDetail(); return; }
     stopStream(); clearTimeout(detailTimer); state.taskEpoch += 1;
     state.selected = id; state.job = null; state.selections.set(state.project, id);
+    review.select(null);
     clearActivity(); tell(); setURL();
     ui.prompt.value = id ? "" : draft().text; ui.runtime.value = draft().runtime;
     renderTask(); renderTasks();
@@ -282,6 +512,7 @@
   const performAction = async () => {
     const action = nextStep()[2], id = state.selected, epoch = state.taskEpoch;
     if (!action || state.actions.has(id)) return;
+    if (action === "review") { review.focus(); return; }
     state.actions.add(id); tell(); renderTask();
     try {
       await request(`/api/jobs/${encodeURIComponent(id)}/${action}`, {});

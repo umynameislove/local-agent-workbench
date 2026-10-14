@@ -458,6 +458,18 @@ def create_app(
         except ReviewBundleUnavailableError as error:
             raise HTTPException(status_code=503, detail=str(error)) from error
 
+    @api.get("/api/jobs/{job_id}/approval")
+    async def read_approval(request: Request, job_id: str) -> dict[str, object]:
+        service: ApprovalService = request.app.state.approval_service
+        try:
+            return service.read(job_id)
+        except ApprovalMissingError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except ApprovalStateError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ApprovalUnavailableError as error:
+            raise HTTPException(status_code=503, detail=str(error)) from error
+
     @api.post("/api/jobs/{job_id}/approval-request")
     async def request_approval(
         request: Request,
