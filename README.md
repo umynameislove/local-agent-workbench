@@ -6,7 +6,7 @@ Local Agent Workbench is an open source macOS application for running real proje
 
 ## Product in one minute
 
-The app opens at login and exposes two native windows:
+The target product opens at login and exposes two native windows. The current implementation is a local browser workspace, not the native shell:
 
 1. **AI Workspace:** project chat, `Auto / Claude / Codex / Local`, plan, tool stream, files, diff, tests, approvals and provider health.
 
@@ -80,6 +80,12 @@ Selection is restored from project and task identifiers in the URL. Reload repla
 
 The worktree indicator describes the stored task binding, not a fresh filesystem check. Rejected task history remains available after explicit retention cleanup; its recorded binding is preserved even when the artifact has been removed.
 
+### Operations view
+
+The workspace separates project navigation, the focused task and an operations panel. Phone sized screens switch between these panels without discarding the draft. Tasks needing attention appear first within loaded history.
+
+`GET /api/control?project_id=...` counts every stored task in the selected configured project, independently of history pagination. It returns aggregate lifecycle and requested runtime counts without requests, model names, account identities, file paths or snapshots. These are recorded states, not process liveness or proof of native execution. Provider quota remains explicitly unknown. Failed reads clear the displayed counts rather than leaving an apparently current value.
+
 The review panel shows changed files, recorded verification, warnings and the unified diff. Prepare a snapshot explicitly after review readiness is recorded, view its diff, then prepare a decision. Approval ID, exact snapshot hash, project scope and original expiry appear before Approve locally, Request changes or Reject becomes available. Approval records permission only; this panel never applies a patch or publishes code. Recorded verification may predate the frozen snapshot and is not a new test run.
 
 `GET /api/jobs/{id}/approval` reads durable authority without creating an approval or extending its deadline. Reload recovers pending, expired and decided records. Historical rounds remain visible but cannot authorize a newer round. An uncertain write is not retried automatically: the panel reads stored state and keeps decisions locked until it can establish the outcome. A conflict keeps that snapshot locked. Diff content, file names and command arguments are displayed as text, not interpreted as markup or executable instructions.
@@ -99,6 +105,22 @@ uv run ruff format --check .
 uv run pytest
 node --test tests/workspace_client.test.cjs
 ```
+
+## Optional Telegram status reader
+
+The separate status reader uses outbound long polling. It does not expose the dashboard, open an inbound port, install Hermes or invoke an AI provider. Create a dedicated bot through Telegram's official BotFather and obtain your numeric Telegram user ID. Do not share the token in chat or commit it to configuration.
+
+After starting the local backend, run this command with your real user ID and explicitly selected project IDs:
+
+```bash
+uv run python -m telegram_gateway --owner-id 123456789 --project sample-api --allow-metadata-egress
+```
+
+The placeholder ID is not a working configuration. Enter the bot token at the hidden terminal prompt. It remains in process memory and is not saved or passed through command arguments. The reader accepts `/start`, `/help` and `/status` only from that user in their matching private chat. It ignores other users, groups, forwarded messages, edited messages and commands older than two minutes. Stop it with Ctrl+C.
+
+Enabling this command explicitly permits aggregate counts for the selected public or private projects to leave the Mac for Telegram. Replies use numbered project aliases, not names, task content, diffs, credentials or account details. Internal and restricted project counts are withheld. Telegram bot messages are cloud messages, not Secret Chats, so this is not an end to end encrypted transport.
+
+This pilot cannot create, run, stop, resume or approve tasks. The Mac must be awake and both the backend and reader must be running. A transport error stops the reader rather than blindly retrying a send. Update deduplication is in memory; a quick restart may repeat a recent status reply, never a task action. Durable command journaling, credential storage and unattended startup are separate prerequisites for future remote execution. Do not share the bot with another poller or webhook consumer.
 
 ## Provider capabilities
 

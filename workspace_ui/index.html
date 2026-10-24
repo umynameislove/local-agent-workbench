@@ -7,8 +7,8 @@
   <title>Workspace · Local Agent Workbench</title>
   <style>
     :root { color-scheme: dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --bg: #131518; --panel: #1a1d21; --line: #31353c; --ink: #eceef1; --muted: #a5abb6;
-      --accent: #b9d4b5; --warm: #eac78a; --danger: #ffb0ab; }
+      --bg: #11171e; --panel: #19222c; --line: #2c3a48; --ink: #ecf1f7; --muted: #a7b5c6;
+      --accent: #9cdccc; --warm: #eac78a; --danger: #ffb0ab; }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--bg); color: var(--ink); font-size: 14px; }
     button, select, textarea { font: inherit; }
@@ -32,16 +32,16 @@
       background: var(--accent); color: #17221b; font-size: 17px; }
     .topbar small { font-weight: 400; color: var(--muted); }
     .health { color: var(--muted); font-size: 12px; }
-    .layout { display: grid; grid-template-columns: 252px minmax(0, 1fr) 272px;
+    .layout { display: grid; grid-template-columns: 244px minmax(0, 1fr) 328px;
       min-height: calc(100dvh - 64px); }
-    .sidebar { background: #171a1e; padding: 24px 16px; border-right: 1px solid var(--line); }
+    .sidebar { background: #141d27; padding: 24px 16px; border-right: 1px solid var(--line); }
     .eyebrow { font-size: 11px; letter-spacing: .09em; color: var(--muted); font-weight: 650;
       text-transform: uppercase; margin: 0 0 12px; }
     .sidebar h2 { margin: 24px 0 10px; font-size: 12px; font-weight: 600; color: var(--muted); }
     .project, .task { display: block; width: 100%; text-align: left; background: transparent;
       border-color: transparent; margin-bottom: 5px; overflow-wrap: anywhere; }
-    .project[aria-current="true"], .task[aria-current="true"] { background: #2a332d;
-      border-color: #435347; }
+    .project[aria-current="true"], .task[aria-current="true"] { background: #20343d;
+      border-color: #4b8f8a; }
     .project { font-weight: 550; }
     .project small, .task small { display: block; color: var(--muted); font-size: 11px;
       line-height: 1.7; font-weight: 400; }
@@ -134,7 +134,20 @@
     .review-binding { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
     .review-binding dt { margin-top: 8px; }
     .review-binding .wide { grid-column: 1 / -1; }
-    @media (max-width: 1180px) {
+    .mobile-nav { display: none; }
+    .operations-title { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+    .operations-title span { color: var(--accent); font-size: 11px; }
+    .metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 16px 0; }
+    .metric { padding: 12px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+    .metric strong { display: block; font-size: 22px; font-weight: 550; margin-bottom: 6px; }
+    .metric span { color: var(--muted); font-size: 10px; }
+    .metric:first-child strong { color: var(--warm); }
+    .runtime-card { margin: 8px 0; padding: 12px; border: 1px solid var(--line);
+      border-radius: 9px; background: #161f29; }
+    .runtime-card strong { font-size: 12px; font-weight: 550; }
+    .runtime-card p { margin: 6px 0 0; font-size: 11px; color: var(--muted); line-height: 1.7; }
+    .task[data-attention="true"] { border-left: 2px solid var(--warm); }
+    @media (max-width: 1080px) {
       .layout { grid-template-columns: 222px minmax(0, 1fr); }
       .inspector { grid-column: 2; border-left: 0; border-top: 1px solid var(--line);
         display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding: 24px 32px; }
@@ -148,6 +161,12 @@
       .topbar { height: auto; min-height: 64px; padding: 14px 16px; }
       .topbar small { display: none; }
       .layout { display: block; }
+      .mobile-nav { display: flex; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+      .mobile-nav button { flex: 1; min-height: 44px; font-size: 12px; }
+      .mobile-nav button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+      .layout[data-view="workspace"] .sidebar, .layout[data-view="workspace"] .inspector,
+      .layout[data-view="projects"] .workspace, .layout[data-view="projects"] .inspector,
+      .layout[data-view="operations"] .sidebar, .layout[data-view="operations"] .workspace { display: none; }
       .sidebar { border-right: 0; border-bottom: 1px solid var(--line); padding: 16px; }
       #project-list { display: flex; gap: 8px; overflow: auto; padding: 3px; }
       .project { min-width: 165px; }
@@ -155,7 +174,8 @@
       .task-header, .conversation { padding: 20px 16px; }
       #notice { margin: 12px 16px 0; }
       .composer-wrap { padding: 16px; }
-      .inspector { padding: 24px 16px; gap: 20px; }
+      .inspector { padding: 24px 16px; gap: 20px; display: block; }
+      .inspector section { margin-bottom: 28px; }
       .welcome { margin: 24px 0; }
       .welcome h2 { font-size: 25px; }
     }
@@ -170,8 +190,13 @@
       <span>Local Agent Workbench <small> / Workspace</small></span></div>
     <span id="health" class="health" role="status">Connecting to local backend…</span>
   </header>
-  <div class="layout">
-    <aside class="sidebar" aria-label="Project and task navigation">
+  <nav class="mobile-nav" aria-label="Workspace panels">
+    <button id="view-projects" type="button" aria-pressed="false" aria-controls="project-navigation">Projects</button>
+    <button id="view-workspace" type="button" aria-pressed="true" aria-controls="main">Workspace</button>
+    <button id="view-operations" type="button" aria-pressed="false" aria-controls="operations">Operations</button>
+  </nav>
+  <div id="layout" class="layout" data-view="workspace">
+    <aside id="project-navigation" class="sidebar" aria-label="Project and task navigation">
       <p class="eyebrow">Your workspace</p>
       <nav id="project-list" aria-label="Projects"></nav>
       <p id="project-empty" class="sidebar-note" hidden>No configured projects. Set project roots in the runtime configuration, then restart the app.</p>
@@ -258,7 +283,18 @@
         </form>
       </div>
     </main>
-    <aside class="inspector" aria-label="Task context and next action">
+    <aside id="operations" class="inspector" aria-label="Operations, task context and next step">
+      <section aria-labelledby="operations-heading">
+        <div class="operations-title"><h2 id="operations-heading">Operations</h2><span>Local ledger</span></div>
+        <p id="control-status" class="subtle" role="status">Choose a project to load recorded activity.</p>
+        <div class="metrics" aria-label="Recorded task counts">
+          <div class="metric"><strong id="control-attention">…</strong><span>Needs you</span></div>
+          <div class="metric"><strong id="control-queued">…</strong><span>Queued</span></div>
+          <div class="metric"><strong id="control-total">…</strong><span>All tasks</span></div>
+        </div>
+        <div id="runtime-roster" aria-label="Requested runtimes"></div>
+        <p class="subtle">Requested runtimes, not live agent sessions. Quota is unknown until a provider reports it.</p>
+      </section>
       <section><p class="eyebrow">Context</p><h2 id="context-title">No project selected</h2>
         <dl><dt>Data policy</dt><dd id="policy">Not available</dd>
           <dt>Cloud permission</dt><dd id="cloud">Not available</dd>

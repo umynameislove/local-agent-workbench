@@ -1785,6 +1785,25 @@ class JobRepository(_Repository):
             ).fetchall()
         return tuple(self._to_record(row) for row in rows)
 
+    def count_by_runtime_and_state(self, project_id: str) -> dict[str, dict[str, int]]:
+        project_id = self._validate_text(project_id, field="project_id")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT runtime, state, COUNT(*) AS count FROM jobs
+                WHERE project_id = ? GROUP BY runtime, state
+                """,
+                (project_id,),
+            ).fetchall()
+        counts: dict[str, dict[str, int]] = {}
+        try:
+            for row in rows:
+                runtime, state = JobRuntime(row["runtime"]), JobState(row["state"])
+                counts.setdefault(runtime.value, {})[state.value] = row["count"]
+        except ValueError as error:
+            raise JobRepositoryError("Stored task counts are invalid.") from error
+        return counts
+
     @classmethod
     def _insert(
         cls,

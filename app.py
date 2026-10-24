@@ -335,6 +335,35 @@ def create_app(
             "next_cursor": jobs[-1].id if len(jobs) == limit else None,
         }
 
+    @api.get("/api/control")
+    async def control_status(request: Request, project_id: str) -> dict[str, object]:
+        project = next((item for item in request.app.state.projects if item.id == project_id), None)
+        if project is None:
+            raise HTTPException(status_code=404, detail="Project does not exist.")
+        try:
+            counts = request.app.state.job_repository.count_by_runtime_and_state(project_id)
+        except JobRepositoryError as error:
+            raise HTTPException(status_code=503, detail="Control status is unavailable.") from error
+        states: dict[str, int] = {}
+        for runtime_counts in counts.values():
+            for state, count in runtime_counts.items():
+                states[state] = states.get(state, 0) + count
+        attention = {"waiting_input", "waiting_approval", "review_ready", "blocked", "failed"}
+        return {
+            "project_id": project.id,
+            "sensitivity": project.sensitivity.value,
+            "basis": "recorded_job_states",
+            "total": sum(states.values()),
+            "needs_attention": sum(count for state, count in states.items() if state in attention),
+            "states": states,
+            "runtimes": [
+                {"runtime": runtime.value, "total": sum(counts.get(runtime.value, {}).values())}
+                for runtime in JobRuntime
+            ],
+            "capabilities": {"native_execution": False, "remote_actions": False},
+            "quota": {"status": "unknown", "remaining_percent": None},
+        }
+
     @api.get("/api/jobs/{job_id}")
     async def read_job(request: Request, job_id: str) -> dict[str, object]:
         try:

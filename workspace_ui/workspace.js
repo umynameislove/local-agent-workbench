@@ -232,15 +232,59 @@ window.WorkbenchReview = ({request, onChange}) => {
     "event-limit", "prompt", "runtime", "create-task", "composer-help", "context-title",
     "policy", "cloud", "requested-runtime", "worktree", "action-title", "action-description",
     "next-action", "header-action", "refresh", "composer", "composer-wrap",
+    "control-status", "control-attention", "control-queued", "control-total", "runtime-roster",
+    "layout", "view-projects", "view-workspace", "view-operations",
   ].map((id) => [id, $(id)]));
   const state = {
     projects: [], project: null, job: null, selected: null, jobs: new Map(), listed: new Set(), cursor: null,
     drafts: new Map(), selections: new Map(), projectEpoch: 0, taskEpoch: 0,
     listEpoch: 0, detailEpoch: 0, stream: null, lastEvent: 0n, events: 0,
-    creating: false, actions: new Set(), loadingOlder: false, pagesLoaded: 0, ready: false,
+    creating: false, actions: new Set(), loadingOlder: false, pagesLoaded: 0, ready: false, controlEpoch: 0,
   };
-  const attentionStates = new Set(["waiting_input", "waiting_approval", "review_ready", "blocked"]);
+  const attentionStates = new Set(["waiting_input", "waiting_approval", "review_ready", "blocked", "failed"]);
   const label = (value) => String(value || "Unknown").replaceAll("_", " ");
+  const showPanel = (panel) => {
+    ui.layout.dataset.view = panel;
+    for (const view of ["projects", "workspace", "operations"]) {
+      ui[`view-${view}`].setAttribute("aria-pressed", String(view === panel));
+    }
+  };
+  const resetControl = (message) => {
+    ui["control-status"].textContent = message;
+    for (const name of ["attention", "queued", "total"]) ui[`control-${name}`].textContent = "…";
+    ui["runtime-roster"].replaceChildren();
+  };
+  const loadControl = async () => {
+    if (!state.project) return;
+    const project = state.project, epoch = ++state.controlEpoch;
+    try {
+      const data = await request(`/api/control?${new URLSearchParams({project_id: project})}`);
+      if (project !== state.project || epoch !== state.controlEpoch) return;
+      const count = (value) => Number.isSafeInteger(value) && value >= 0;
+      const names = new Map([["auto", "Auto routing"], ["codex", "Codex"], ["claude", "Claude Code"], ["local", "Local AI"]]);
+      if (data.project_id !== project || data.basis !== "recorded_job_states"
+          || !count(data.total) || !count(data.needs_attention) || !data.states
+          || Object.values(data.states).some((value) => !count(value)) || !Array.isArray(data.runtimes)
+          || data.runtimes.length !== 4 || new Set(data.runtimes.map((item) => item?.runtime)).size !== 4
+          || data.runtimes.some((item) => !names.has(item?.runtime) || !count(item.total))) {
+        throw new Error("Control status is unreadable.");
+      }
+      ui["control-status"].textContent = "All stored tasks in this project. Refreshed from the local backend.";
+      ui["control-attention"].textContent = String(data.needs_attention);
+      ui["control-queued"].textContent = String(data.states.queued || 0);
+      ui["control-total"].textContent = String(data.total);
+      ui["runtime-roster"].replaceChildren();
+      for (const item of data.runtimes) {
+        const card = document.createElement("article"); card.className = "runtime-card";
+        const title = document.createElement("strong"), description = document.createElement("p");
+        title.textContent = names.get(item.runtime);
+        description.textContent = `${item.total} recorded requests · Execution not connected`;
+        card.append(title, description); ui["runtime-roster"].append(card);
+      }
+    } catch {
+      if (project === state.project && epoch === state.controlEpoch) resetControl("Control status unavailable. Refresh to retry.");
+    }
+  };
   const draft = () => {
     if (!state.drafts.has(state.project)) state.drafts.set(state.project, {text: "", runtime: "auto"});
     return state.drafts.get(state.project);
@@ -305,10 +349,12 @@ window.WorkbenchReview = ({request, onChange}) => {
     const focused = document.activeElement?.dataset.job;
     ui["task-list"].replaceChildren();
     const jobs = [...state.jobs.values()].sort((a, b) =>
-      b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
+      Number(attentionStates.has(b.state)) - Number(attentionStates.has(a.state))
+      || b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
     for (const job of jobs) {
       const button = document.createElement("button"); button.type = "button"; button.className = "task";
       button.dataset.job = job.id;
+      button.dataset.attention = String(attentionStates.has(job.state));
       button.setAttribute("aria-current", String(job.id === state.selected));
       const title = document.createElement("span"); title.textContent = job.title;
       const meta = document.createElement("small");
@@ -466,6 +512,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     });
   };
   const selectTask = (id, focus = false) => {
+    showPanel("workspace");
     if (id === state.selected && state.job) { loadDetail(); return; }
     stopStream(); clearTimeout(detailTimer); state.taskEpoch += 1;
     state.selected = id; state.job = null; state.selections.set(state.project, id);
@@ -480,6 +527,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     state.projectEpoch += 1; state.jobs = new Map(); state.listed = new Set(); state.cursor = null;
     state.loadingOlder = false; state.pagesLoaded = 0;
     state.project = id; renderProjects();
+    resetControl("Loading project activity…"); loadControl();
     selectTask(initialTask === undefined ? state.selections.get(id) || null : initialTask);
     await loadTasks();
   };
@@ -521,7 +569,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     finally { state.actions.delete(id); if (epoch === state.taskEpoch) renderTask(); }
   };
   const refresh = async () => {
-    tell(); await loadTasks(); await loadDetail();
+    tell(); loadControl(); await loadTasks(); await loadDetail();
   };
   ui.prompt.addEventListener("input", () => { draft().text = ui.prompt.value; renderTask(); });
   ui.runtime.addEventListener("change", () => { draft().runtime = ui.runtime.value; });
@@ -536,6 +584,9 @@ window.WorkbenchReview = ({request, onChange}) => {
   ui["next-action"].addEventListener("click", performAction);
   ui["header-action"].addEventListener("click", performAction);
   ui.refresh.addEventListener("click", refresh);
+  for (const panel of ["projects", "workspace", "operations"]) {
+    ui[`view-${panel}`].addEventListener("click", () => showPanel(panel));
+  }
   window.addEventListener("pagehide", stopStream);
   const initialize = async () => {
     try {
@@ -549,5 +600,5 @@ window.WorkbenchReview = ({request, onChange}) => {
     } catch (error) { ui.health.textContent = "Local backend unavailable"; tell(error.message); }
   };
   initialize();
-  setInterval(() => { if (!document.hidden && state.ready && !state.loadingOlder) { loadTasks(); loadDetail(); } }, 10000);
+  setInterval(() => { if (!document.hidden && state.ready && !state.loadingOlder) { loadTasks(); loadDetail(); loadControl(); } }, 10000);
 })();

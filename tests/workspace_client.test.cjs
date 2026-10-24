@@ -71,6 +71,16 @@ function harness(options = {}) {
       {id: "alpha", sensitivity: "private", cloud_allowed: false, permission_mode: "sandboxed-write"},
       {id: "beta", sensitivity: "public", cloud_allowed: true, permission_mode: "sandboxed-write"},
     ]});
+    if (url.startsWith("/api/control?")) {
+      const project = new URL(url, currentURL).searchParams.get("project_id");
+      const selected = [...jobs.values()].filter((item) => item.project_id === project);
+      const states = {};
+      for (const item of selected) states[item.state] = (states[item.state] || 0) + 1;
+      return response({project_id: project, basis: "recorded_job_states", total: selected.length,
+        needs_attention: selected.filter((item) => ["waiting_input", "waiting_approval", "review_ready", "blocked", "failed"].includes(item.state)).length,
+        states, runtimes: ["auto", "codex", "claude", "local"].map((runtime) => ({runtime,
+          total: selected.filter((item) => item.runtime === runtime).length}))});
+    }
     if (url.startsWith("/api/jobs?")) {
       const query = new URL(url, currentURL).searchParams;
       const values = [...jobs.values()].filter((item) => item.project_id === query.get("project_id"));
@@ -113,6 +123,46 @@ function harness(options = {}) {
     async advance(ms) { elapsed += ms; for (const callback of intervals) callback(); await flush(); },
   };
 }
+
+test("operations show stored counts, unknown execution and attention first without a mutation", async () => {
+  const h = harness({jobs: [job("new"), {...job("older"), state: "failed", runtime: "codex"}]});
+  await flush();
+  assert.equal(h.node("control-total").textContent, "2");
+  assert.equal(h.node("control-attention").textContent, "1");
+  assert.equal(h.node("control-queued").textContent, "0");
+  assert.equal(h.node("task-list").children[0].dataset.job, "older");
+  assert.equal(h.node("runtime-roster").children.length, 4);
+  assert.match(h.node("runtime-roster").children[1].children[1].textContent, /1 recorded requests · Execution not connected/);
+  assert.equal(h.calls.some((call) => call.init.method !== "GET"), false);
+});
+
+test("a delayed operations response cannot leak another project's counts", async () => {
+  const late = deferred();
+  const h = harness({handle: (url) => url === "/api/control?project_id=alpha" ? late.promise : undefined});
+  await flush(); await h.clickProject("beta");
+  assert.equal(h.node("control-total").textContent, "1");
+  late.resolve(h.response({project_id: "alpha", basis: "recorded_job_states", total: 99}));
+  await flush();
+  assert.equal(h.node("control-total").textContent, "1");
+  assert.equal(h.node("runtime-roster").children.length, 4);
+});
+
+test("unreadable operations clear old counts and phone panels preserve the draft", async () => {
+  const h = harness(); await flush(); h.type("Keep this draft");
+  await h.node("view-operations").fire("click");
+  assert.equal(h.node("layout").dataset.view, "operations");
+  assert.equal(h.node("view-operations")["aria-pressed"], "true");
+  await h.node("view-projects").fire("click");
+  assert.equal(h.node("layout").dataset.view, "projects");
+  await h.node("view-workspace").fire("click");
+  assert.equal(h.node("prompt").value, "Keep this draft");
+  h.handle((url) => url.startsWith("/api/control?") ? h.response({total: "secret"}) : undefined);
+  await h.advance(10000);
+  assert.equal(h.node("control-total").textContent, "…");
+  assert.equal(h.node("runtime-roster").children.length, 0);
+  assert.match(h.node("control-status").textContent, /unavailable/);
+  assert.equal(h.calls.some((call) => call.init.method !== "GET"), false);
+});
 
 test("new requests and selected task actions stay separate; drafts survive switches and refresh", async () => {
   const h = harness(); await flush();
