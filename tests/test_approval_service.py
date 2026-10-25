@@ -464,7 +464,7 @@ async def test_schema_eleven_bundle_survives_revision_migration(tmp_path: Path) 
         assert connection.execute("SELECT version FROM schema_version").fetchone() == (11,)
         assert connection.execute("SELECT COUNT(*) FROM review_bundles").fetchone() == (1,)
     upgraded = Database(path)
-    assert upgraded.initialize() == LATEST_SCHEMA_VERSION == 12
+    assert upgraded.initialize() == LATEST_SCHEMA_VERSION
     assert ReviewBundleRepository(upgraded).get("job-001").payload_hash == bundle["bundle_hash"]
     with sqlite3.connect(path) as connection:
         assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
