@@ -1,6 +1,6 @@
 # Local Agent Workbench
 
-> A local AI workbench where Claude, Codex and local Qwen work together with durable state, while an optional affordable consultant provides bounded advice.
+> A local AI workbench for project specific agent teams, durable native execution and reviewed local changes.
 
 Local Agent Workbench is an open source macOS application for running real project work through multiple AI runtimes from one persistent app. It is not another chat wrapper: every task has durable state, an isolated worktree, an explainable route, a review bundle and an explicit promotion gate.
 
@@ -23,7 +23,7 @@ task → local policy check → plan → isolated worktree → execute
 
 1. Native Claude Code and Codex runtimes use the user's subscriptions; this project does not turn them into paid API calls.
 
-2. OpenRouter is optional and restricted to `deepseek/deepseek-v4-flash-0731` as an untrusted consultant. It cannot execute tools, write files or approve actions.
+2. Version two configuration describes connections, models, agent profiles and project teams. OpenRouter inference and API tool execution remain unavailable. Legacy advice configuration never grants a worker role or spending authority through migration.
 
 3. A local Qwen model suggests classifications and handles private or repetitive work; deterministic backend policy owns routing and fails closed when cloud use is forbidden.
 
@@ -58,7 +58,25 @@ Relative project roots are resolved from the directory containing `config.json`.
 
 The application can start without `config.json` and reports an empty project list. When configuration is present, matching projects are registered once in SQLite. A later configuration that conflicts with persisted project identity or policy fails closed instead of rewriting durable state.
 
-Submit a task with `POST /api/jobs`. The client provides only `project_id`, `request` and optional `runtime` and `model` values. The server creates the job identity, verifies the repository `HEAD` and stores an immutable snapshot of the project policy and selected runtime. The response omits the project root and internal snapshot.
+Submit a task with `POST /api/jobs`. The client provides `project_id`, `request` and optional `runtime`, `model` and `agent_id` values. An explicit agent must belong to the selected project team; runtime and model preferences cannot override that profile. The server verifies repository `HEAD` and freezes project policy plus the resolved team, profile, source and model. Legacy submissions remain readable but do not gain execution authority from later settings. Responses omit project roots, account references and internal snapshots.
+
+### Project teams and native execution
+
+Version one configuration remains supported without enabling native execution. `team_config.migrate_config` returns a version two copy with an empty agent system, native execution disabled and legacy advice disabled. It does not write a file, discover accounts or modify credentials. The public example intentionally stays disabled and compatible with version one.
+
+In version two, `agent_system` contains `connections`, `models`, `agents`, `teams` and explicit `native_execution_enabled`. The default global limit is four active agents with one heavy local lane. The first supervisor is deliberately stricter: one native writer across the database. Higher fleet capacity is not yet implemented. Local configuration must identify a native account slot and its verified capabilities; no browser response contains a credential reference or account directory. A source connection alone never permits project access. Native subscription workers are cloud runtimes and cannot execute for cloud prohibited projects.
+
+`GET /api/projects/{id}/team` reads the current roster and revision. `PUT` takes exactly `revision` and `team`; revision zero creates a previously absent team, and a stale revision returns conflict. Initial configuration seeds a missing team only once, so local API edits survive restart. Disabling a team or removing its active agent records cancellation for its owned native attempt. Snapshots do not expand after an edit, and revocation still prevents further execution. Team settings UI and automatic Lead delegation are not included yet.
+
+The native supervisor currently supports a Codex implementer with the `native_workspace` tool and explicit relative directory write scopes. It rejects API models, arbitrary native tool subsets, document scoping and step/token limits it cannot enforce. Model metadata is an operator configuration assertion, not a model quality or quota measurement.
+
+After explicit agent submission, planning and worktree preparation, `GET /api/jobs/{id}/execution` returns the current authorization hash and any recorded attempt. `POST` to the same route takes exactly `authorization_hash`; a matching request starts only when local configuration explicitly enables native execution. No task starts automatically at submission or application startup. The adapter verifies required CLI options and accepts only recognized ChatGPT login mode. API key mode and unknown authentication output fail closed. This is an authentication method check, not proof of plan entitlement, remaining quota or a successful live provider run. The selected account directory must be exclusively managed by the operator; an external account change cannot be fenced by the local database.
+
+Admission persists an attempt, fixed account slot, worktree identity and authority before spawning. Concurrent or duplicate starts observe that attempt rather than launching again. Native events enter the durable SSE ledger. A coherent successful native turn moves the task to verification, never directly to approval or promotion. Reported completion followed by a failed process exit is failure, not success.
+
+`POST /api/jobs/{id}/execution/cancel` takes exactly `attempt_id`. Cancellation intent is recorded before process termination. The supervisor also monitors team revocation and a configured execution timeout. It confirms local process group termination before releasing the writer lane and retains partial work for review. It cannot promise remote inference cancellation, rollback or containment of processes that escape the owned group.
+
+After a crash or uncertain termination, the attempt remains reserved and reports reconciliation required. Restart does not replay it, rotate accounts, trust a saved PID or automatically free the writer lane. Automatic recovery and additional attempts are intentionally unavailable pending explicit reconciliation. Native execution is available through these local APIs, not a new chat or execution control in the browser UI. Real account activation and the first live task require the operator's separate approval.
 
 `POST /api/jobs/{id}/plan` records a deterministic demo planning preview through the durable job and event lifecycle. `GET /api/jobs/{id}/plan` returns the same plan block after a restart, and the event stream can replay it. The preview does not inspect repository files, create a worktree or authorize execution. Native provider planning remains a separate integration step.
 
@@ -72,7 +90,7 @@ Current foundation includes the runtime home boundary, initial local directories
 
 ## Development quick start
 
-The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, stored task history, explicitly labeled demo planning, isolated worktree creation, live ledger events and frozen review decisions. Runtime selection records a requested preference; this shell does not start native execution, provide follow up chat or display provider quota.
+The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, stored task history, explicitly labeled demo planning, isolated worktree creation, live ledger events and frozen review decisions. Runtime selection in this shell records a requested preference; native start requires the separate explicit agent and execution APIs above. Follow up chat and provider quota are not available.
 
 Selection is restored from project and task identifiers in the URL. Reload replays the durable ledger, while drafts remain only in the open page and are never written to browser storage. Task responses omit internal snapshots and absolute storage paths. The entire HTTP surface requires a loopback client and host, rejects foreign origins and cross site browser requests, and disables response caching. This is a single operator local application, not a multiuser authentication boundary.
 

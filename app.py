@@ -60,6 +60,8 @@ from job_submission import (
     JobSubmissionValidationError,
 )
 from logging_setup import configure_logging
+from native_execution import NativeExecutionService
+from native_store import NativeAttemptRepository, NativeConflictError, NativeStoreError
 from planning import (
     PlanningConflictError,
     PlanningNotFoundError,
@@ -94,6 +96,8 @@ from secret_gate import (
     SecretGateNotFoundError,
     SecretGateUnavailableError,
 )
+from team_config import AgentSystem, TeamConfigError
+from team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
 from verification import VerificationRunner
 from workspace_ui import asset
 from worktree import (
@@ -110,6 +114,7 @@ def create_app(
     cwd: Path | None = None,
     user_home: Path | None = None,
     job_id_factory: Callable[[], str] | None = None,
+    native_adapter_factory: Callable | None = None,
 ) -> FastAPI:
     runtime: RuntimeHome = resolve_runtime_home(env, cwd=cwd, user_home=user_home)
     runtime_home_configured = bool(
@@ -135,11 +140,18 @@ def create_app(
             app.state.project_repository.register(project) for project in configured_projects
         )
         app.state.job_repository = JobRepository(database)
+        system = configuration.agent_system if configuration else AgentSystem()
+        app.state.team_repository = TeamRepository(
+            database, system, frozenset(project.id for project in app.state.projects)
+        )
+        app.state.team_repository.seed()
         app.state.job_submission_service = JobSubmissionService(
             app.state.project_repository,
             app.state.job_repository,
             active_project_ids=frozenset(project.id for project in app.state.projects),
             id_factory=job_id_factory,
+            teams=app.state.team_repository,
+            config_version=configuration.version if configuration else 1,
         )
         app.state.event_repository = EventRepository(database)
         app.state.event_stream_service = EventStreamService(
@@ -184,6 +196,16 @@ def create_app(
             app.state.atomic_transition_service,
             runtime.worktrees,
         )
+        app.state.native_attempt_repository = NativeAttemptRepository(database)
+        app.state.native_execution_service = NativeExecutionService(
+            app.state.job_repository,
+            app.state.project_repository,
+            app.state.team_repository,
+            app.state.native_attempt_repository,
+            app.state.worktree_manager,
+            runtime.root,
+            adapter_factory=native_adapter_factory,
+        )
         app.state.promotion_service = PromotionService(
             app.state.project_repository,
             app.state.job_repository,
@@ -223,7 +245,10 @@ def create_app(
                 },
             },
         )
-        yield
+        try:
+            yield
+        finally:
+            await app.state.native_execution_service.close()
 
     api = FastAPI(title="Local Agent Workbench", version=APP_VERSION, lifespan=lifespan)
 
@@ -360,7 +385,12 @@ def create_app(
                 {"runtime": runtime.value, "total": sum(counts.get(runtime.value, {}).values())}
                 for runtime in JobRuntime
             ],
-            "capabilities": {"native_execution": False, "remote_actions": False},
+            "capabilities": {
+                "native_execution": (
+                    request.app.state.team_repository.system.native_execution_enabled
+                ),
+                "remote_actions": False,
+            },
             "quota": {"status": "unknown", "remaining_percent": None},
         }
 
@@ -401,6 +431,60 @@ def create_app(
             "runtime": job.runtime.value,
             "state": job.state.value,
         }
+
+    def team_error(error: Exception) -> HTTPException:
+        if isinstance(error, (JobNotFoundError, TeamNotFoundError)):
+            return HTTPException(status_code=404, detail="Project team or job does not exist.")
+        if isinstance(error, TeamConfigError):
+            return HTTPException(status_code=422, detail="Team or execution request is invalid.")
+        if isinstance(error, (TeamConflictError, NativeConflictError)):
+            return HTTPException(status_code=409, detail=str(error))
+        return HTTPException(status_code=503, detail="Team or native execution is unavailable.")
+
+    @api.get("/api/projects/{project_id}/team")
+    async def read_team(request: Request, project_id: str) -> dict[str, object]:
+        try:
+            return request.app.state.team_repository.get(project_id).to_dict()
+        except TeamStoreError as error:
+            raise team_error(error) from error
+
+    @api.put("/api/projects/{project_id}/team")
+    async def save_team(
+        request: Request, project_id: str, payload: Annotated[object, Body()]
+    ) -> dict[str, object]:
+        try:
+            return request.app.state.team_repository.put(project_id, payload).to_dict()
+        except (TeamStoreError, TeamConfigError) as error:
+            raise team_error(error) from error
+
+    @api.get("/api/jobs/{job_id}/execution")
+    async def read_execution(request: Request, job_id: str) -> dict[str, object]:
+        try:
+            return request.app.state.native_execution_service.read(job_id)
+        except (JobRepositoryError, NativeStoreError) as error:
+            raise team_error(error) from error
+
+    @api.post("/api/jobs/{job_id}/execution", status_code=202)
+    async def start_execution(
+        request: Request, job_id: str, payload: Annotated[object, Body()]
+    ) -> dict[str, object]:
+        try:
+            return await request.app.state.native_execution_service.start(job_id, payload)
+        except (JobRepositoryError, NativeStoreError, TeamStoreError, TeamConfigError) as error:
+            raise team_error(error) from error
+        except (WorktreeConflictError, WorktreeUnavailableError) as error:
+            raise HTTPException(
+                status_code=409, detail="Native worktree is unavailable."
+            ) from error
+
+    @api.post("/api/jobs/{job_id}/execution/cancel")
+    async def cancel_execution(
+        request: Request, job_id: str, payload: Annotated[object, Body()]
+    ) -> dict[str, object]:
+        try:
+            return await request.app.state.native_execution_service.cancel(job_id, payload)
+        except (JobRepositoryError, NativeStoreError, TeamConfigError) as error:
+            raise team_error(error) from error
 
     @api.post("/api/jobs/{job_id}/plan")
     async def run_plan(request: Request, job_id: str) -> dict[str, object]:
