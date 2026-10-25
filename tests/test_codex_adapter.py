@@ -40,7 +40,12 @@ def fake_codex(tmp_path: Path) -> Path:
             home = Path(os.environ["CODEX_HOME"])
             command = sys.argv[1:]
             if command == ["login", "status"]:
+                if (home / "authenticated").is_file():
+                    print("Logged in using ChatGPT", file=sys.stderr)
                 raise SystemExit(0 if (home / "authenticated").is_file() else 1)
+            if command == ["exec", "--help"]:
+                print("--json --sandbox --cd --ignore-user-config --ignore-rules --strict-config")
+                raise SystemExit(0)
             if not command or command[0] != "exec":
                 raise SystemExit(2)
 
@@ -54,7 +59,14 @@ def fake_codex(tmp_path: Path) -> Path:
                 handle.write(json.dumps(record, separators=(",", ":")) + "\\n")
 
             thread_id = "thread-" + home.name
+            if prompt == "no-session":
+                time.sleep(30)
             print(json.dumps({{"type": "thread.started", "thread_id": thread_id}}), flush=True)
+            if prompt in ("complete-then-fail", "complete-then-wait"):
+                print(json.dumps({{"type": "turn.completed", "usage": {{}}}}), flush=True)
+                if prompt == "complete-then-wait":
+                    time.sleep(30)
+                raise SystemExit(9)
             if prompt == "wait":
                 time.sleep(30)
             if prompt == "fail":
@@ -483,7 +495,7 @@ async def test_cancel_is_not_blocked_by_a_queued_followup(tmp_path: Path, fake_c
 
 
 @pytest.mark.anyio
-async def test_cancel_falls_back_when_process_group_signal_is_denied(
+async def test_cancel_reaps_parent_but_does_not_claim_group_stopped_when_signal_is_denied(
     tmp_path: Path,
     fake_codex: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -498,7 +510,11 @@ async def test_cancel_falls_back_when_process_group_signal_is_denied(
     await provider.cancel(session)
     events = await collect(provider, session)
 
-    assert events[-1].payload == {"status": "cancelled"}
+    assert events[-1].payload == {"status": "failed"}
+    assert provider.stopped("job") is False
+    state = provider._states["job"]
+    assert state.turn is not None and state.turn.process is not None
+    assert state.turn.process.returncode is not None
 
 
 @pytest.mark.anyio

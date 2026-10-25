@@ -25,9 +25,11 @@ from engine import (
     ProjectConfig,
     run_process,
 )
+from team_config import TeamConfigError
+from team_store import TeamRepository, TeamStoreError
 
 PROJECT_POLICY_VERSION = 1
-_ALLOWED_FIELDS = frozenset({"project_id", "request", "runtime", "model"})
+_ALLOWED_FIELDS = frozenset({"project_id", "request", "runtime", "model", "agent_id"})
 _REQUIRED_FIELDS = frozenset({"project_id", "request"})
 _MAX_REQUEST_BYTES = 262_144
 
@@ -58,6 +60,7 @@ class JobSubmission:
     request: str
     runtime: JobRuntime = JobRuntime.AUTO
     model: str | None = None
+    agent_id: str | None = None
 
     @classmethod
     def from_payload(cls, payload: object) -> JobSubmission:
@@ -98,7 +101,16 @@ class JobSubmission:
             not isinstance(model, str) or not model or model != model.strip() or "\x00" in model
         ):
             raise JobSubmissionValidationError("Job model is invalid.")
-        return cls(project_id=project_id, request=request, runtime=runtime, model=model)
+        agent_id = payload.get("agent_id")
+        if agent_id is not None and (
+            not isinstance(agent_id, str)
+            or not agent_id
+            or agent_id != agent_id.strip()
+            or len(agent_id) > 192
+            or "\x00" in agent_id
+        ):
+            raise JobSubmissionValidationError("Job agent identity is invalid.")
+        return cls(project_id, request, runtime, model, agent_id)
 
 
 class JobSubmissionService:
@@ -111,6 +123,8 @@ class JobSubmissionService:
         *,
         active_project_ids: frozenset[str],
         id_factory: Callable[[], str] | None = None,
+        teams: TeamRepository | None = None,
+        config_version: int = CONFIG_VERSION,
     ) -> None:
         if not isinstance(projects, ProjectRepository) or not isinstance(jobs, JobRepository):
             raise TypeError("Job submission requires project and job repositories.")
@@ -124,13 +138,38 @@ class JobSubmissionService:
         self._jobs = jobs
         self._active_project_ids = active_project_ids
         self._id_factory = id_factory or (lambda: f"job-{uuid4().hex}")
+        self._teams = teams
+        self._config_version = config_version
 
     async def submit(self, payload: object) -> JobRecord:
         submission = JobSubmission.from_payload(payload)
         project = self._load_project(submission.project_id)
+        binding = None
+        if submission.agent_id is not None:
+            if self._teams is None:
+                raise JobSubmissionConflictError("Project teams are not configured.")
+            try:
+                binding = self._teams.snapshot(submission.project_id, submission.agent_id)
+                selected = JobRuntime(binding["connection"]["kind"])
+                selected_model = binding["model"]["model"]
+                if submission.runtime not in {JobRuntime.AUTO, selected} or (
+                    submission.model is not None and submission.model != selected_model
+                ):
+                    raise TeamConfigError("Submission conflicts with selected agent.")
+                submission = JobSubmission(
+                    submission.project_id,
+                    submission.request,
+                    selected,
+                    selected_model,
+                    submission.agent_id,
+                )
+            except (TeamConfigError, TeamStoreError, ValueError) as error:
+                raise JobSubmissionConflictError(
+                    "Selected agent is unavailable for this project."
+                ) from error
         repo_head = await self._read_repo_head(Path(project.root))
         snapshot = {
-            "config_version": CONFIG_VERSION,
+            "config_version": self._config_version,
             "model": submission.model,
             "policy_version": PROJECT_POLICY_VERSION,
             "project": self._project_snapshot(project.to_config()),
@@ -138,6 +177,8 @@ class JobSubmissionService:
             "repo_head": repo_head,
             "runtime": submission.runtime.value,
         }
+        if binding is not None:
+            snapshot["agent_binding"] = binding
         job = JobCreate(
             id=self._id_factory(),
             project_id=submission.project_id,

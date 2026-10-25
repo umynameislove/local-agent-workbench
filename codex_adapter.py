@@ -4,9 +4,9 @@ import asyncio
 import math
 import os
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -25,6 +25,7 @@ from engine import (
     ProviderHealth,
     ProviderHealthState,
     RuntimeEvent,
+    RuntimeEventKind,
     run_process,
 )
 from write_boundary import WriteBoundary, WriteBoundaryError
@@ -55,6 +56,8 @@ class _Turn:
     claimed: bool = False
     cancel_requested: bool = False
     spawned: asyncio.Future[None] | None = None
+    completion: RuntimeEvent | None = None
+    stopped: bool = False
 
 
 @dataclass
@@ -120,6 +123,12 @@ class CodexAdapter:
         self._states: dict[str, _SessionState] = {}
         self._reserved_jobs: set[str] = set()
         self._registry_lock = asyncio.Lock()
+        self._start_guard: Callable[[], None] | None = None
+
+    def install_start_guard(self, guard: Callable[[], None]) -> None:
+        if not callable(guard) or self._states or self._reserved_jobs:
+            raise AdapterError("Native start guard cannot be changed during execution.")
+        self._start_guard = guard
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -145,7 +154,14 @@ class CodexAdapter:
             )
         except ProcessRunnerError:
             return False
-        return result.returncode == 0
+        try:
+            outputs = (result.stdout.decode("utf-8").strip(), result.stderr.decode("utf-8").strip())
+        except UnicodeError:
+            return False
+        return result.returncode == 0 and outputs in {
+            ("Logged in using ChatGPT", ""),
+            ("", "Logged in using ChatGPT"),
+        }
 
     async def health(self) -> ProviderHealth:
         observations = await asyncio.gather(
@@ -160,6 +176,30 @@ class CodexAdapter:
             else ProviderHealthState.UNAVAILABLE
         )
         return ProviderHealth(state, datetime.now(UTC))
+
+    async def check_compatibility(self) -> bool:
+        """Check required command options without reading or changing account credentials."""
+        try:
+            result = await run_process(
+                (self._executable, "exec", "--help"),
+                cwd=Path.cwd(),
+                env=self._environment(self._accounts.slots[0]),
+                timeout=self._login_timeout,
+            )
+            help_text = result.stdout.decode("utf-8")
+        except (ProcessRunnerError, UnicodeError):
+            return False
+        return result.returncode == 0 and all(
+            option in help_text
+            for option in (
+                "--json",
+                "--sandbox",
+                "--cd",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--strict-config",
+            )
+        )
 
     async def start(self, request: AdapterStart) -> AdapterSession:
         if not isinstance(request, AdapterStart):
@@ -187,6 +227,7 @@ class CodexAdapter:
                 write_boundary,
                 writable_roots,
             )
+            self._states[request.job_id] = state
             turn = self._launch(state, self._start_command(state), request.request)
             await self._await_spawn(turn)
             session = await self._await_session(state, turn)
@@ -194,6 +235,11 @@ class CodexAdapter:
                 self._states[request.job_id] = state
             return session
         except asyncio.CancelledError:
+            if state is not None and state.turn is not None:
+                state.turn.cancel_requested = True
+                await self._stop(state.turn)
+            raise
+        except Exception:
             if state is not None and state.turn is not None:
                 state.turn.cancel_requested = True
                 await self._stop(state.turn)
@@ -235,6 +281,29 @@ class CodexAdapter:
         raise AdapterUnsupportedError(
             "Codex resume after application restart requires durable account binding."
         )
+
+    async def stop_job(self, job_id: str) -> bool:
+        """Stop an owned turn even when session startup did not finish."""
+        state = self._states.get(job_id)
+        if state is None:
+            return job_id not in self._reserved_jobs
+        state.cancelled = True
+        if state.turn is not None:
+            state.turn.cancel_requested = True
+            await self._stop(state.turn)
+            return state.turn.stopped
+        return True
+
+    def stopped(self, job_id: str) -> bool:
+        state = self._states.get(job_id)
+        return state is None or (state.turn is not None and state.turn.stopped)
+
+    def outcome(self, job_id: str) -> str | None:
+        state = self._states.get(job_id)
+        turn = None if state is None else state.turn
+        if turn is None or not turn.stopped or turn.completion is None:
+            return None
+        return str(turn.completion.payload["status"])
 
     async def stream(self, session: AdapterSession) -> AsyncIterator[RuntimeEvent]:
         state = self._check(session)
@@ -391,16 +460,32 @@ class CodexAdapter:
     ) -> None:
         stderr_task: asyncio.Task[None] | None = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                cwd=state.worktree,
-                env=self._environment(state.account),
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                limit=self._max_line_bytes + 1,
-            )
+
+            async def guarded_spawn():
+                if self._start_guard is not None:
+                    try:
+                        self._start_guard()
+                    except Exception:
+                        raise AdapterError("Native authority changed before launch.") from None
+                return await asyncio.create_subprocess_exec(
+                    *command,
+                    cwd=state.worktree,
+                    env=self._environment(state.account),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    start_new_session=True,
+                    limit=self._max_line_bytes + 1,
+                )
+
+            spawn = asyncio.create_task(guarded_spawn())
+            try:
+                process = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                process = await spawn
+                turn.process = process
+                await self._terminate(process)
+                raise
             turn.process = process
             if turn.spawned is not None and not turn.spawned.done():
                 turn.spawned.set_result(None)
@@ -442,11 +527,19 @@ class CodexAdapter:
                 )
                 self._publish(turn, turn.translator.complete("failed"))
             state.failed = turn.translator.completion_status == "failed"
+            if turn.completion is not None:
+                status = (
+                    "cancelled"
+                    if turn.cancel_requested
+                    else ("failed" if returncode != 0 else turn.completion.payload["status"])
+                )
+                turn.completion = replace(turn.completion, payload={"status": status})
+                state.failed = status == "failed"
         except asyncio.CancelledError:
             if turn.process is not None:
                 await self._terminate(turn.process)
             raise
-        except (OSError, UnicodeError, ValueError, CodexNativeProtocolError):
+        except (OSError, UnicodeError, ValueError, CodexNativeProtocolError, AdapterError):
             if turn.spawned is not None and not turn.spawned.done():
                 turn.spawned.set_exception(AdapterError("Codex process could not be started."))
             self._publish(
@@ -458,23 +551,64 @@ class CodexAdapter:
             if turn.process is not None:
                 await self._terminate(turn.process)
         finally:
+            if turn.process is not None:
+                if turn.process.returncode is None:
+                    await self._terminate(turn.process)
+                turn.stopped = await self._group_stopped(turn.process)
+            else:
+                turn.stopped = True
             state.next_sequence = turn.translator.next_sequence
             if stderr_task is not None:
-                await stderr_task
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(stderr_task, 1.0)
             if turn.spawned is not None and not turn.spawned.done():
                 turn.spawned.set_exception(AdapterError("Codex process could not be started."))
+            if turn.completion is not None:
+                if not turn.stopped:
+                    turn.completion = replace(turn.completion, payload={"status": "failed"})
+                turn.queue.put_nowait(turn.completion)
             await turn.queue.put(_STREAM_END)
 
     @staticmethod
     def _publish(turn: _Turn, events: tuple[RuntimeEvent, ...]) -> None:
         for event in events:
-            turn.queue.put_nowait(event)
+            if event.kind is RuntimeEventKind.COMPLETION:
+                turn.completion = event
+            else:
+                turn.queue.put_nowait(event)
+
+    @staticmethod
+    async def _group_stopped(process: asyncio.subprocess.Process) -> bool:
+        """Reap remaining members of the owned process group, never an unrelated PID."""
+        if process.returncode is None:
+            return False
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        for _ in range(20):
+            try:
+                os.killpg(process.pid, 0)
+            except ProcessLookupError:
+                return True
+            except PermissionError:
+                return False
+            await asyncio.sleep(0.025)
+        return False
 
     async def _stop(self, turn: _Turn) -> None:
-        if turn.process is not None and turn.process.returncode is None:
+        if turn.process is not None:
             await self._terminate(turn.process)
         if turn.task is not None:
-            await turn.task
+            try:
+                await asyncio.wait_for(asyncio.shield(turn.task), 4.0)
+            except TimeoutError:
+                turn.task.cancel()
+                with suppress(asyncio.CancelledError, TimeoutError):
+                    await asyncio.wait_for(turn.task, 4.0)
+                raise AdapterError("Codex termination requires reconciliation.") from None
 
     @staticmethod
     async def _discard(reader: asyncio.StreamReader) -> None:
@@ -483,9 +617,10 @@ class CodexAdapter:
 
     @staticmethod
     async def _terminate(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
         CodexAdapter._signal_process(process, signal.SIGTERM)
+        if process.returncode is not None:
+            CodexAdapter._signal_process(process, signal.SIGKILL)
+            return
         try:
             await asyncio.wait_for(process.wait(), 2.0)
         except TimeoutError:

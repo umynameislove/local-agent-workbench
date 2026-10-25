@@ -1078,6 +1078,57 @@ MIGRATIONS = (
             """,
         ),
     ),
+    Migration(
+        version=13,
+        name="project_teams_and_native_attempts",
+        statements=(
+            """
+            CREATE TABLE project_teams (
+                project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE RESTRICT,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                payload TEXT NOT NULL CHECK (json_valid(payload) AND json_type(payload) = 'object'
+                    AND length(CAST(payload AS BLOB)) <= 1048576),
+                payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+                updated_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now'))
+            )
+            """,
+            """
+            CREATE TABLE native_attempts (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL UNIQUE REFERENCES jobs(id) ON DELETE RESTRICT,
+                owner TEXT NOT NULL,
+                account_slot TEXT NOT NULL,
+                worktree_path TEXT NOT NULL,
+                worktree_identity TEXT NOT NULL CHECK (json_valid(worktree_identity)),
+                authorization TEXT NOT NULL CHECK (json_valid(authorization)),
+                phase TEXT NOT NULL CHECK (phase IN ('admitted','running','reconcile','settled')),
+                held INTEGER NOT NULL CHECK (held IN (0,1)),
+                cancel_requested INTEGER NOT NULL DEFAULT 0 CHECK (cancel_requested IN (0,1)),
+                session_id TEXT,
+                outcome TEXT CHECK (outcome IN ('completed','failed','cancelled')),
+                created_at TEXT NOT NULL DEFAULT (STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                CHECK ((phase = 'settled' AND held = 0 AND outcome IS NOT NULL)
+                    OR (phase != 'settled' AND held = 1 AND outcome IS NULL))
+            )
+            """,
+            "CREATE UNIQUE INDEX one_native_writer ON native_attempts(held) WHERE held = 1",
+            """
+            CREATE TRIGGER native_attempt_identity BEFORE UPDATE ON native_attempts
+            WHEN NEW.id != OLD.id OR NEW.job_id != OLD.job_id OR NEW.owner != OLD.owner
+                OR NEW.account_slot != OLD.account_slot OR NEW.worktree_path != OLD.worktree_path
+                OR NEW.worktree_identity != OLD.worktree_identity
+                OR NEW.authorization != OLD.authorization OR NEW.created_at != OLD.created_at
+                OR (OLD.session_id IS NOT NULL AND NEW.session_id IS NOT OLD.session_id)
+                OR NEW.cancel_requested < OLD.cancel_requested
+                OR OLD.phase = 'settled'
+            BEGIN SELECT RAISE(ABORT, 'Native attempt identity is immutable.'); END
+            """,
+            """
+            CREATE TRIGGER native_attempt_no_delete BEFORE DELETE ON native_attempts
+            BEGIN SELECT RAISE(ABORT, 'Native attempts cannot be deleted.'); END
+            """,
+        ),
+    ),
 )
 
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
