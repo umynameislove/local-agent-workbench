@@ -16,6 +16,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from team_config import AgentSystem, TeamConfigError
+
 APP_VERSION = "0.1.0"
 RUNTIME_ENV = "AGENT_WORKBENCH_HOME"
 CONFIG_FILENAME = "config.json"
@@ -1165,6 +1167,7 @@ class WorkbenchConfig:
     providers: Mapping[str, bool]
     consultant: ConsultantConfig
     retention: RetentionConfig = RetentionConfig()
+    agent_system: AgentSystem = AgentSystem()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WorkbenchConfig:
@@ -1172,8 +1175,19 @@ class WorkbenchConfig:
             raise ConfigurationError("Config root must be an object.")
         if not isinstance(value.get("version"), int) or isinstance(value.get("version"), bool):
             raise ConfigurationError("Config version must be an integer.")
-        if value.get("version") != CONFIG_VERSION:
+        if value.get("version") not in {1, 2}:
             raise ConfigurationError("Unsupported config version.")
+        if value["version"] == 1 and "agent_system" in value:
+            raise ConfigurationError("Agent settings require config version two.")
+        if value["version"] == 2 and set(value) - {
+            "version",
+            "projects",
+            "providers",
+            "consultant",
+            "retention",
+            "agent_system",
+        }:
+            raise ConfigurationError("Config contains unsupported fields.")
         project_values = value.get("projects", [])
         if not isinstance(project_values, list):
             raise ConfigurationError("projects must be an array.")
@@ -1190,12 +1204,28 @@ class WorkbenchConfig:
             if not isinstance(enabled, bool):
                 raise ConfigurationError("Provider flags must be booleans.")
             normalized_providers[str(key)] = enabled
+        try:
+            agent_system = AgentSystem.from_dict(value.get("agent_system", {}))
+            by_id = {project.id: project for project in projects}
+            for team in agent_system.teams:
+                if team.project_id not in by_id:
+                    raise TeamConfigError("Team project does not exist.")
+                project = by_id[team.project_id]
+                agent_system.validate_project(
+                    team,
+                    project.sensitivity.value,
+                    project.cloud_allowed,
+                    project.permission_mode.value,
+                )
+        except (TeamConfigError, TypeError, OverflowError) as error:
+            raise ConfigurationError("Agent settings violate the project policy.") from error
         return cls(
-            version=CONFIG_VERSION,
+            version=value["version"],
             projects=projects,
             providers=normalized_providers,
             consultant=ConsultantConfig.from_dict(value.get("consultant", {})),
             retention=RetentionConfig.from_dict(value.get("retention", {})),
+            agent_system=agent_system,
         )
 
     @classmethod
