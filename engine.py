@@ -9,6 +9,7 @@ import sys
 from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -1168,6 +1169,7 @@ class WorkbenchConfig:
     consultant: ConsultantConfig
     retention: RetentionConfig = RetentionConfig()
     agent_system: AgentSystem = AgentSystem()
+    verification_commands: Mapping[str, tuple[str, ...]] = dataclass_field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WorkbenchConfig:
@@ -1177,7 +1179,7 @@ class WorkbenchConfig:
             raise ConfigurationError("Config version must be an integer.")
         if value.get("version") not in {1, 2}:
             raise ConfigurationError("Unsupported config version.")
-        if value["version"] == 1 and "agent_system" in value:
+        if value["version"] == 1 and {"agent_system", "verification_commands"} & set(value):
             raise ConfigurationError("Agent settings require config version two.")
         if value["version"] == 2 and set(value) - {
             "version",
@@ -1186,6 +1188,7 @@ class WorkbenchConfig:
             "consultant",
             "retention",
             "agent_system",
+            "verification_commands",
         }:
             raise ConfigurationError("Config contains unsupported fields.")
         project_values = value.get("projects", [])
@@ -1219,6 +1222,18 @@ class WorkbenchConfig:
                 )
         except (TeamConfigError, TypeError, OverflowError) as error:
             raise ConfigurationError("Agent settings violate the project policy.") from error
+        commands = value.get("verification_commands", {})
+        if not isinstance(commands, Mapping) or any(
+            project_id not in by_id
+            or not isinstance(argv, list)
+            or not 1 <= len(argv) <= 256
+            or any(not isinstance(arg, str) or not arg or "\x00" in arg for arg in argv)
+            or sum(len(arg.encode("utf-8")) for arg in argv) > 65_536
+            for project_id, argv in commands.items()
+        ):
+            raise ConfigurationError(
+                "Verification commands must name configured projects and argv."
+            )
         return cls(
             version=value["version"],
             projects=projects,
@@ -1226,6 +1241,9 @@ class WorkbenchConfig:
             consultant=ConsultantConfig.from_dict(value.get("consultant", {})),
             retention=RetentionConfig.from_dict(value.get("retention", {})),
             agent_system=agent_system,
+            verification_commands=MappingProxyType(
+                {key: tuple(argv) for key, argv in commands.items()}
+            ),
         )
 
     @classmethod

@@ -271,13 +271,15 @@ class PreReviewSecretGate:
         self._scanner = scanner or SecretScanner()
         self._locks: dict[str, asyncio.Lock] = {}
 
-    async def evaluate(self, job_id: str) -> ReviewReadiness:
+    async def evaluate(self, job_id: str, *, expected_digest: str | None = None) -> ReviewReadiness:
         normalized_id = self._validate_job_id(job_id)
         lock = self._locks.setdefault(normalized_id, asyncio.Lock())
         async with lock:
             job = self._load_job(normalized_id)
             review = await self._collect(job)
             scan = self._scanner.scan(review)
+            if expected_digest is not None and scan.digest != expected_digest:
+                raise SecretGateConflictError("Current changes do not match verified content.")
             if not scan.passed:
                 if job.state is JobState.REVIEW_READY:
                     raise SecretGateConflictError("Review ready content changed after scanning.")
