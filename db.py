@@ -1131,6 +1131,50 @@ MIGRATIONS = (
     ),
 )
 
+MIGRATIONS += (
+    Migration(
+        version=14,
+        name="durable_remote_receipts",
+        statements=(
+            """
+            CREATE TABLE remote_receipts (
+                channel TEXT NOT NULL,
+                update_id INTEGER NOT NULL CHECK (update_id >= 0),
+                payload_hash TEXT NOT NULL CHECK (length(payload_hash) = 64),
+                scope_hash TEXT NOT NULL CHECK (length(scope_hash) = 64),
+                actor INTEGER,
+                chat INTEGER,
+                issued_at INTEGER,
+                expires_at INTEGER NOT NULL,
+                phase TEXT NOT NULL CHECK (phase IN
+                    ('received','ready','sending','sent','uncertain','ignored','expired')),
+                reply TEXT CHECK (reply IS NULL OR length(CAST(reply AS BLOB)) <= 16384),
+                message_id INTEGER,
+                PRIMARY KEY(channel, update_id),
+                CHECK ((phase IN ('ready','sending','sent','uncertain') AND reply IS NOT NULL)
+                    OR phase IN ('received','ignored','expired')),
+                CHECK ((phase = 'sent' AND message_id IS NOT NULL) OR
+                    (phase != 'sent' AND message_id IS NULL))
+            )
+            """,
+            """
+            CREATE TRIGGER remote_receipt_identity BEFORE UPDATE ON remote_receipts
+            WHEN NEW.channel != OLD.channel OR NEW.update_id != OLD.update_id
+                OR NEW.payload_hash != OLD.payload_hash OR NEW.scope_hash != OLD.scope_hash
+                OR NEW.actor IS NOT OLD.actor OR NEW.chat IS NOT OLD.chat
+                OR NEW.issued_at IS NOT OLD.issued_at OR NEW.expires_at != OLD.expires_at
+                OR (OLD.reply IS NOT NULL AND NEW.reply IS NOT OLD.reply)
+                OR OLD.phase IN ('sent','uncertain','ignored','expired')
+            BEGIN SELECT RAISE(ABORT, 'Remote receipt identity is immutable.'); END
+            """,
+            """
+            CREATE TRIGGER remote_receipt_no_delete BEFORE DELETE ON remote_receipts
+            BEGIN SELECT RAISE(ABORT, 'Remote receipt history is immutable.'); END
+            """,
+        ),
+    ),
+)
+
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 
 
