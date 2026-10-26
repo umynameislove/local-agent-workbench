@@ -5,7 +5,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     "review", "review-heading", "review-message", "review-error", "review-content", "review-scope",
     "review-hash", "review-base", "review-id", "review-expiry", "review-decision", "review-files",
     "review-checks", "review-risks", "review-diff", "review-patches", "review-view", "review-prepare",
-    "review-request", "review-approve", "review-changes", "review-reject", "review-reload",
+    "review-request", "review-approve", "review-changes", "review-reject", "review-reload", "review-apply",
   ].map((id) => [id, document.getElementById(id)]));
   const decisions = new Set(["approved", "changes_requested", "rejected"]);
   const busy = new Set(), uncertain = new Map(), deadlines = new Map();
@@ -24,6 +24,8 @@ window.WorkbenchReview = ({request, onChange}) => {
   const canDecide = () => available() && status.job_state === "waiting_approval"
     && status.approval?.state === "pending" && performance.now() < deadline
     && viewed === bundle.bundle_hash;
+  const canApply = () => available() && status.job_state === "approved"
+    && status.approval?.decision === "approved" && viewed === bundle.bundle_hash;
   const element = (tag, value, className = "") => {
     const node = document.createElement(tag); node.textContent = value; node.className = className; return node;
   };
@@ -38,6 +40,8 @@ window.WorkbenchReview = ({request, onChange}) => {
     ui["review-view"].disabled = !bundle || loading;
     ui["review-reload"].disabled = !job || loading || busy.has(job.id);
     for (const name of ["approve", "changes", "reject"]) ui[`review-${name}`].disabled = !canDecide();
+    ui["review-apply"].hidden = status?.approval?.decision !== "approved";
+    ui["review-apply"].disabled = !canApply();
     const alert = error || held?.message || "";
     if (ui["review-error"].textContent !== alert) ui["review-error"].textContent = alert;
     ui["review-error"].hidden = !ui["review-error"].textContent;
@@ -45,7 +49,8 @@ window.WorkbenchReview = ({request, onChange}) => {
     if (loading && !status) message = "Reading stored review state…";
     else if (job && busy.has(job.id)) message = "Recording one action. Decisions are locked until state is reconciled.";
     else if (status && bundle && !status.review_current) message = "Historical review. A newer review round exists. Prepare its snapshot explicitly.";
-    else if (approval?.decision) message = `Recorded decision: ${label(approval.decision)}. No patch was applied by this review panel.`;
+    else if (status?.job_state === "completed") message = "The approved patch was applied locally. No commit or push was made.";
+    else if (approval?.decision) message = `Recorded decision: ${label(approval.decision)}. Apply locally is a separate action after inspecting this snapshot.`;
     else if (approval?.state === "expired" || pendingExpired) message = "This approval has expired. Reload does not extend it. Operator recovery is required.";
     else if (active() && viewed !== bundle.bundle_hash) message = "View the unified diff for this exact snapshot before preparing or recording a decision.";
     else if (active() && !approval) message = "Prepare a decision to obtain its stored approval ID and original expiry.";
@@ -138,7 +143,8 @@ window.WorkbenchReview = ({request, onChange}) => {
     if ((held.hash && data.bundle_hash && held.hash !== data.bundle_hash)
       || (held.kind === "prepare" && data.review_current)
       || (held.kind === "request" && a && a.bundle_hash === held.hash)
-      || (held.kind === "decision" && a?.approval_id === held.id && a.decision)) uncertain.delete(data.job_id);
+      || (held.kind === "decision" && a?.approval_id === held.id && a.decision)
+      || (held.kind === "promote" && data.job_state === "completed" && a?.approval_id === held.id)) uncertain.delete(data.job_id);
   };
   const load = async () => {
     if (!job || loading || busy.has(job.id)) return;
@@ -176,17 +182,20 @@ window.WorkbenchReview = ({request, onChange}) => {
   };
   const perform = async (kind, decision) => {
     if (!job || loading || busy.has(job.id) || uncertain.has(job.id)) return;
-    if (kind === "prepare" ? !canPrepare() : kind === "request" ? !canRequest() : !canDecide() || !decisions.has(decision)) return;
+    if (kind === "prepare" ? !canPrepare() : kind === "request" ? !canRequest()
+      : kind === "promote" ? !canApply() : !canDecide() || !decisions.has(decision)) return;
     const expected = job, epoch = generation, boundHash = bundle?.bundle_hash, id = status.approval?.approval_id;
     const prefix = `/api/jobs/${encodeURIComponent(expected.id)}`;
-    const path = kind === "prepare" ? `${prefix}/review-bundle` : kind === "request" ? `${prefix}/approval-request` : `/api/approvals/${encodeURIComponent(id)}`;
-    const payload = kind === "prepare" ? {} : kind === "request" ? {bundle_hash: boundHash} : {decision, bundle_hash: boundHash};
+    const path = kind === "prepare" ? `${prefix}/review-bundle` : kind === "request" ? `${prefix}/approval-request`
+      : `/api/approvals/${encodeURIComponent(id)}${kind === "promote" ? "/promote" : ""}`;
+    const payload = kind === "prepare" ? {} : ["request", "promote"].includes(kind) ? {bundle_hash: boundHash} : {decision, bundle_hash: boundHash};
     busy.add(expected.id); error = ""; renderControls();
     try {
       const data = await request(path, payload);
       if (data?.job_id !== expected.id || !hash(data.bundle_hash)
         || (kind !== "prepare" && data.bundle_hash !== boundHash)
         || (kind === "request" && (!text(data.approval_id) || !date(data.expires_at) || data.state !== "pending"))
+        || (kind === "promote" && (data.approval_id !== id || data.job_state !== "completed"))
         || (kind === "decision" && (data.approval_id !== id || data.decision !== decision))) {
         throw new Error("Action response is unreadable. It may already have succeeded. Reload stored state; do not resubmit.");
       }
@@ -210,6 +219,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     ui[`review-${name}`].addEventListener("click", () => perform("decision", value));
   }
   ui["review-reload"].addEventListener("click", load);
+  ui["review-apply"].addEventListener("click", () => perform("promote"));
   setInterval(() => { if (job && status?.approval?.state === "pending") renderControls(); }, 1000);
   select(null);
   return {
@@ -223,6 +233,103 @@ window.WorkbenchReview = ({request, onChange}) => {
   };
 };
 
+window.WorkbenchExecution = ({request, onChange}) => {
+  const ui = Object.fromEntries(["execution", "execution-heading", "execution-message", "execution-scope",
+    "execution-start", "execution-cancel", "execution-verify", "execution-ready", "execution-reload"]
+    .map((id) => [id, document.getElementById(id)]));
+  let job = null, epoch = 0, reading = 0, data = null, error = "", loading = false;
+  const busy = new Set(), held = new Map();
+  const hash = (v) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+  const current = (id, version, read = reading) => job?.id === id && epoch === version && read === reading;
+  const render = () => {
+    ui.execution.hidden = !job;
+    const native = data?.execution, check = data?.verification, attempt = native?.attempt;
+    const blocked = !job || !data || loading || busy.has(job.id) || held.has(job.id);
+    ui["execution-scope"].textContent = data?.agent
+      ? `Frozen agent ${data.agent.id} · ${data.agent.runtime} · ${data.agent.model || "Native default"} · Writes: ${data.agent.write_paths.join(", ")}`
+      : "This task has no executable agent binding. Create a new task with a project agent to run it.";
+    ui["execution-start"].hidden = !(data?.job_state === "queued" && job?.worktree_ready && data.agent);
+    ui["execution-start"].disabled = blocked || !native?.enabled || Boolean(attempt);
+    ui["execution-cancel"].hidden = !attempt || !["admitted", "running"].includes(attempt.phase);
+    ui["execution-cancel"].disabled = blocked || attempt?.cancel_requested;
+    ui["execution-verify"].hidden = data?.job_state !== "verifying";
+    ui["execution-verify"].disabled = blocked || !check?.command.length || check.status !== "not_started";
+    ui["execution-ready"].hidden = data?.job_state !== "verifying";
+    ui["execution-ready"].disabled = blocked || check?.status !== "passed";
+    ui["execution-reload"].disabled = loading || !job || busy.has(job.id);
+    let message = "Read task workflow state before starting an action.";
+    if (data) message = `Native execution ${native.enabled ? "enabled" : "disabled by local configuration"}. Verification: ${check.status.replaceAll("_", " ")}.`;
+    if (attempt) message += ` Attempt ${attempt.attempt_id}: ${attempt.phase}${attempt.outcome ? `, ${attempt.outcome}` : ""}.`;
+    if (check?.command.length) message += ` Trusted check: ${JSON.stringify(check.command)}. Runs locally in the isolated worktree; no command comes from the provider.`;
+    if (native?.requires_reconciliation) message = "Native termination needs operator reconciliation. No restart or account switch will be attempted.";
+    if (busy.has(job?.id)) message = "Recording one action. Wait for its stored result.";
+    ui["execution-message"].textContent = error || held.get(job?.id)?.message || message;
+  };
+  const valid = (v, selected) => v?.job_id === selected.id && v.project_id === selected.project_id
+    && typeof v.job_state === "string" && v.execution?.job_id === selected.id
+    && hash(v.execution.authorization_hash) && typeof v.execution.enabled === "boolean"
+    && typeof v.execution.requires_reconciliation === "boolean"
+    && (v.agent === null || (typeof v.agent?.id === "string" && typeof v.agent.runtime === "string"
+      && Array.isArray(v.agent.write_paths) && v.agent.write_paths.every((p) => typeof p === "string")))
+    && (v.execution.attempt === null || (typeof v.execution.attempt?.attempt_id === "string"
+      && ["admitted", "running", "reconcile", "settled"].includes(v.execution.attempt.phase)))
+    && hash(v.verification?.authorization_hash) && Array.isArray(v.verification.command)
+    && v.verification.command.every((a) => typeof a === "string")
+    && ["not_started", "uncertain", "passed", "failed"].includes(v.verification.status);
+  const load = async () => {
+    if (!job || loading || busy.has(job.id)) return;
+    const selected = job, version = epoch, read = ++reading;
+    loading = true; error = ""; render();
+    try {
+      const value = await request(`/api/jobs/${encodeURIComponent(selected.id)}/workflow`);
+      if (!current(selected.id, version, read)) return;
+      if (!valid(value, selected)) throw new Error("Workflow response is unreadable. Actions remain locked.");
+      data = value;
+      const pending = held.get(selected.id), attempt = value.execution.attempt;
+      if (pending && ((pending.kind === "start" && attempt)
+        || (pending.kind === "cancel" && attempt?.attempt_id === pending.id && (attempt.cancel_requested || attempt.phase === "settled"))
+        || (pending.kind === "verify" && value.verification.status !== "not_started")
+        || (pending.kind === "ready" && value.job_state === "review_ready"))) held.delete(selected.id);
+    } catch (failure) {
+      if (current(selected.id, version, read)) { data = null; error = failure.message; }
+    } finally { if (current(selected.id, version, read)) { loading = false; render(); } }
+  };
+  const perform = async (kind) => {
+    const button = ui[`execution-${kind}`];
+    if (!job || !data || button.disabled || button.hidden) return;
+    const selected = job, version = epoch, native = data.execution, check = data.verification;
+    const id = native.attempt?.attempt_id;
+    const suffix = {start: "execution", cancel: "execution/cancel", verify: "verification", ready: "review-readiness"}[kind];
+    const body = kind === "start" ? {authorization_hash: native.authorization_hash}
+      : kind === "cancel" ? {attempt_id: id} : kind === "verify" ? {authorization_hash: check.authorization_hash} : {};
+    busy.add(selected.id); error = ""; render();
+    try {
+      const result = await request(`/api/jobs/${encodeURIComponent(selected.id)}/${suffix}`, body);
+      if (kind === "ready" ? result?.job_id !== selected.id
+        : kind === "verify" ? !valid(result, selected) : result?.job_id !== selected.id) {
+        throw new Error("Action response is unreadable. Read stored state before trying again.");
+      }
+    } catch (failure) {
+      held.set(selected.id, {kind: failure.status === 409 ? "conflict" : kind, id,
+        message: `${failure.message} This action will not be resubmitted automatically.`});
+    } finally {
+      busy.delete(selected.id);
+      if (current(selected.id, version)) { await load(); onChange(); }
+    }
+  };
+  for (const action of ["start", "cancel", "verify", "ready"]) ui[`execution-${action}`].addEventListener("click", () => perform(action));
+  ui["execution-reload"].addEventListener("click", load);
+  return {
+    select(selected) { epoch++; reading++; job = selected; data = null; loading = false; error = ""; render(); },
+    update(selected) {
+      if (job?.id !== selected.id || job.project_id !== selected.project_id) this.select(selected);
+      else job = selected;
+      return load();
+    },
+    focus() { ui["execution-heading"].focus(); },
+  };
+};
+
 (() => {
   const $ = (id) => document.getElementById(id);
   const ui = Object.fromEntries([
@@ -233,13 +340,14 @@ window.WorkbenchReview = ({request, onChange}) => {
     "policy", "cloud", "requested-runtime", "worktree", "action-title", "action-description",
     "next-action", "header-action", "refresh", "composer", "composer-wrap",
     "control-status", "control-attention", "control-queued", "control-total", "runtime-roster",
-    "layout", "view-projects", "view-workspace", "view-operations",
+    "layout", "view-projects", "view-workspace", "view-operations", "agent",
   ].map((id) => [id, $(id)]));
   const state = {
     projects: [], project: null, job: null, selected: null, jobs: new Map(), listed: new Set(), cursor: null,
     drafts: new Map(), selections: new Map(), projectEpoch: 0, taskEpoch: 0,
     listEpoch: 0, detailEpoch: 0, stream: null, lastEvent: 0n, events: 0,
     creating: false, actions: new Set(), loadingOlder: false, pagesLoaded: 0, ready: false, controlEpoch: 0,
+    agents: [], agentsLoading: false,
   };
   const attentionStates = new Set(["waiting_input", "waiting_approval", "review_ready", "blocked", "failed"]);
   const label = (value) => String(value || "Unknown").replaceAll("_", " ");
@@ -278,7 +386,7 @@ window.WorkbenchReview = ({request, onChange}) => {
         const card = document.createElement("article"); card.className = "runtime-card";
         const title = document.createElement("strong"), description = document.createElement("p");
         title.textContent = names.get(item.runtime);
-        description.textContent = `${item.total} recorded requests · Execution not connected`;
+        description.textContent = `${item.total} recorded requests · Recorded preference, not live execution`;
         card.append(title, description); ui["runtime-roster"].append(card);
       }
     } catch {
@@ -286,7 +394,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     }
   };
   const draft = () => {
-    if (!state.drafts.has(state.project)) state.drafts.set(state.project, {text: "", runtime: "auto"});
+    if (!state.drafts.has(state.project)) state.drafts.set(state.project, {text: "", runtime: "auto", agent: ""});
     return state.drafts.get(state.project);
   };
   const tell = (message = "") => {
@@ -316,6 +424,28 @@ window.WorkbenchReview = ({request, onChange}) => {
   const validJob = (job, project = state.project) => job && typeof job.id === "string"
     && job.project_id === project && typeof job.state === "string" && typeof job.title === "string";
   const review = window.WorkbenchReview({request, onChange: () => loadDetail()});
+  const execution = window.WorkbenchExecution({request, onChange: () => loadDetail()});
+  const loadAgents = async () => {
+    const project = state.project, epoch = state.projectEpoch;
+    state.agents = []; state.agentsLoading = true; ui.agent.replaceChildren(); renderTask();
+    const option = (value, title) => { const item = document.createElement("option"); item.value = value; item.textContent = title; return item; };
+    ui.agent.append(option("", "Record only, no worker"));
+    try {
+      const data = await request(`/api/projects/${encodeURIComponent(project)}/agents`);
+      if (epoch !== state.projectEpoch) return;
+      if (data?.project_id !== project || !Array.isArray(data.agents)
+        || data.agents.some((a) => typeof a?.id !== "string" || a.runtime !== "codex" || a.role !== "implementer")) throw new Error("Project agents unavailable.");
+      state.agents = data.agents;
+      for (const a of data.agents) ui.agent.append(option(a.id, `${a.id} · ${a.runtime} · ${a.model || "Native default"}`));
+    } catch { if (epoch === state.projectEpoch) state.agents = []; }
+    finally {
+      if (epoch === state.projectEpoch) {
+        state.agentsLoading = false;
+        ui.agent.value = state.agents.some((a) => a.id === draft().agent) ? draft().agent : "";
+        renderTask();
+      }
+    }
+  };
   const setURL = () => {
     const url = new URL(location.href);
     url.search = "";
@@ -378,8 +508,9 @@ window.WorkbenchReview = ({request, onChange}) => {
       return ["Prepare an isolated worktree", "Create a local checkout from this task's recorded commit. The project checkout stays unchanged.", "worktree"];
     }
     if (job.state === "queued" && job.worktree_ready) {
-      return ["Worktree is prepared", "Native execution is not connected to this workspace yet. No provider has been started by this UI.", null];
+      return ["Review execution scope", "Start the frozen project agent explicitly. No task starts automatically.", "execution"];
     }
+    if (["running", "verifying"].includes(job.state)) return ["Inspect task execution", "Read the owned attempt, cancellation and trusted verification state.", "execution"];
     if (["review_ready", "waiting_approval", "approved", "rejected"].includes(job.state)) {
       return ["Inspect the frozen review", "View recorded verification, scope and diff. Decisions stay bound to one stored snapshot.", "review"];
     }
@@ -411,19 +542,21 @@ window.WorkbenchReview = ({request, onChange}) => {
     for (const button of [ui["next-action"], ui["header-action"]]) {
       button.hidden = !action;
       button.textContent = state.actions.has(state.selected) ? "Working…"
-        : action === "plan" ? "Generate demo plan" : action === "review" ? "Inspect review" : "Create isolated worktree";
+        : action === "plan" ? "Generate demo plan" : action === "review" ? "Inspect review"
+        : action === "execution" ? "Inspect execution" : "Create isolated worktree";
       button.disabled = state.actions.has(state.selected);
     }
     const editable = state.ready && Boolean(project) && !state.selected && !state.creating;
     ui.composer.dataset.mode = state.selected ? "history" : "draft";
     ui["composer-wrap"].dataset.mode = ui.composer.dataset.mode;
-    ui.prompt.disabled = !editable; ui.runtime.disabled = !editable;
-    ui["create-task"].disabled = !editable || !ui.prompt.value.trim();
+    ui.prompt.disabled = !editable; ui.runtime.disabled = !editable || Boolean(ui.agent.value);
+    ui.agent.disabled = !editable || state.agentsLoading;
+    ui["create-task"].disabled = !editable || state.agentsLoading || !ui.prompt.value.trim();
     ui["create-task"].textContent = state.creating ? "Creating…" : "Create task ↗";
     ui["composer-help"].textContent = state.selected
       ? "This is a recorded task. Follow up chat is not connected yet. Choose New task to create a separate request."
       : state.creating ? "Creating one task. If the connection drops, inspect task history before submitting again."
-      : "Draft stays in this page only. Cmd/Ctrl + Enter creates one task. Native execution and paid API calls are not started here.";
+      : "Select a configured project agent for native work, or record a request only. Creating a task never starts execution or paid inference.";
   };
   const loadTasks = async (older = false) => {
     if (!state.project || (older && (!state.cursor || state.loadingOlder))) return;
@@ -460,6 +593,7 @@ window.WorkbenchReview = ({request, onChange}) => {
       state.job = job; state.jobs.set(id, job); renderTask(); renderTasks();
       if (!state.stream) connectStream();
       review.update(job);
+      execution.update(job);
     } catch (error) {
       if (taskEpoch === state.taskEpoch && detailEpoch === state.detailEpoch) tell(error.message);
     }
@@ -517,8 +651,10 @@ window.WorkbenchReview = ({request, onChange}) => {
     stopStream(); clearTimeout(detailTimer); state.taskEpoch += 1;
     state.selected = id; state.job = null; state.selections.set(state.project, id);
     review.select(null);
+    execution.select(null);
     clearActivity(); tell(); setURL();
     ui.prompt.value = id ? "" : draft().text; ui.runtime.value = draft().runtime;
+    ui.agent.value = draft().agent || "";
     renderTask(); renderTasks();
     if (id) loadDetail(); else if (focus && !state.creating) ui.prompt.focus();
   };
@@ -527,6 +663,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     state.projectEpoch += 1; state.jobs = new Map(); state.listed = new Set(); state.cursor = null;
     state.loadingOlder = false; state.pagesLoaded = 0;
     state.project = id; renderProjects();
+    loadAgents();
     resetControl("Loading project activity…"); loadControl();
     selectTask(initialTask === undefined ? state.selections.get(id) || null : initialTask);
     await loadTasks();
@@ -534,12 +671,14 @@ window.WorkbenchReview = ({request, onChange}) => {
   const createTask = async (event) => {
     event.preventDefault();
     if (!state.project || state.selected || state.creating || !ui.prompt.value.trim()) return;
-    const project = state.project, text = ui.prompt.value, runtime = ui.runtime.value;
+    const project = state.project, text = ui.prompt.value, agent = ui.agent.value;
+    if (state.agentsLoading || (agent && !state.agents.some((a) => a.id === agent))) return;
+    const runtime = agent ? "auto" : ui.runtime.value;
     const epoch = state.projectEpoch, taskEpoch = state.taskEpoch;
     if (new TextEncoder().encode(text).length > 262144) { tell("Request is too large. Keep it within 256 KiB."); return; }
     state.creating = true; tell(); renderTask();
     try {
-      const job = await request("/api/jobs", {project_id: project, request: text, runtime});
+      const job = await request("/api/jobs", {project_id: project, request: text, runtime, ...(agent ? {agent_id: agent} : {})});
       if (!job || typeof job.id !== "string" || job.project_id !== project) throw new Error("Submission response is unreadable. Inspect task history before trying again.");
       const submittedDraft = state.drafts.get(project);
       if (submittedDraft && submittedDraft.text === text) {
@@ -561,6 +700,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     const action = nextStep()[2], id = state.selected, epoch = state.taskEpoch;
     if (!action || state.actions.has(id)) return;
     if (action === "review") { review.focus(); return; }
+    if (action === "execution") { execution.focus(); return; }
     state.actions.add(id); tell(); renderTask();
     try {
       await request(`/api/jobs/${encodeURIComponent(id)}/${action}`, {});
@@ -573,6 +713,7 @@ window.WorkbenchReview = ({request, onChange}) => {
   };
   ui.prompt.addEventListener("input", () => { draft().text = ui.prompt.value; renderTask(); });
   ui.runtime.addEventListener("change", () => { draft().runtime = ui.runtime.value; });
+  ui.agent.addEventListener("change", () => { draft().agent = ui.agent.value; renderTask(); });
   ui.composer.addEventListener("submit", createTask);
   ui.prompt.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
