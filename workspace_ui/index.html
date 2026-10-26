@@ -225,6 +225,17 @@
           <p class="steps">Create task → Demo plan → Isolated worktree</p>
         </section>
         <section id="transcript" aria-label="Selected task activity" hidden>
+          <section id="execution" class="review" hidden aria-labelledby="execution-heading">
+            <h2 id="execution-heading" tabindex="-1">Execution and verification</h2>
+            <p id="execution-scope"></p><p id="execution-message" role="status" class="subtle"></p>
+            <div class="review-actions">
+              <button id="execution-start" type="button" disabled>Start selected agent</button>
+              <button id="execution-cancel" type="button" disabled>Request cancellation</button>
+              <button id="execution-verify" type="button" disabled>Run trusted check</button>
+              <button id="execution-ready" type="button" disabled>Scan changes for review</button>
+              <button id="execution-reload" type="button" disabled>Reload execution</button>
+            </div>
+          </section>
           <article class="request"><span class="eyebrow">Your request</span><p id="request-text"></p></article>
           <section id="review" class="review" aria-labelledby="review-heading" hidden>
             <p class="eyebrow">Human review</p>
@@ -259,6 +270,7 @@
               <button id="review-changes" type="button" disabled>Request changes</button>
               <button id="review-reject" type="button" disabled>Reject</button>
               <button id="review-reload" type="button" disabled>Reload review</button>
+              <button id="review-apply" type="button" class="primary" hidden disabled>Apply approved patch locally</button>
             </div>
             <p class="review-boundary">Approve records permission only. It does not apply a patch, commit, push or start a provider.
               Request changes records a revision request. Reject retains the worktree under its recorded retention policy.</p>
@@ -277,9 +289,11 @@
           <div class="composer-actions">
             <div class="runtime-field"><label for="runtime">Requested runtime</label>
               <select id="runtime" disabled><option value="auto">Auto</option><option value="codex">Codex</option><option value="claude">Claude</option><option value="local">Local</option></select></div>
+            <div class="runtime-field"><label for="agent">Project agent</label>
+              <select id="agent" disabled><option value="">Record only, no worker</option></select></div>
             <button id="create-task" class="primary" type="submit" disabled>Create task ↗</button>
           </div>
-          <p id="composer-help" class="composer-help">Choose a project to start. This shell does not start native execution or make paid API calls.</p>
+          <p id="composer-help" class="composer-help">Choose a project and agent. Native work starts only after a separate explicit action.</p>
         </form>
       </div>
     </main>
@@ -306,7 +320,7 @@
         <button id="refresh" type="button">Refresh state</button></section>
       <section class="boundary"><h2>Connected, without pretending</h2>
         <p>Tasks, demo planning, worktrees, the event ledger and frozen review decisions are connected to the local backend.</p>
-        <p>Native execution, follow up chat, provider quota and patch application are not connected here yet. A requested runtime is a preference, not proof of execution.</p></section>
+        <p>Explicit agent start, cancellation, configured checks and approved local patch application use the same local services. Follow up chat and provider quota remain unavailable.</p></section>
     </aside>
   </div>
   <noscript>This workspace requires JavaScript to connect to the local backend.</noscript>

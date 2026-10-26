@@ -76,7 +76,17 @@ Admission persists an attempt, fixed account slot, worktree identity and authori
 
 `POST /api/jobs/{id}/execution/cancel` takes exactly `attempt_id`. Cancellation intent is recorded before process termination. The supervisor also monitors team revocation and a configured execution timeout. It confirms local process group termination before releasing the writer lane and retains partial work for review. It cannot promise remote inference cancellation, rollback or containment of processes that escape the owned group.
 
-After a crash or uncertain termination, the attempt remains reserved and reports reconciliation required. Restart does not replay it, rotate accounts, trust a saved PID or automatically free the writer lane. Automatic recovery and additional attempts are intentionally unavailable pending explicit reconciliation. Native execution is available through these local APIs, not a new chat or execution control in the browser UI. Real account activation and the first live task require the operator's separate approval.
+After a crash or uncertain termination, the attempt remains reserved and reports reconciliation required. Restart does not replay it, rotate accounts, trust a saved PID or automatically free the writer lane. Automatic recovery and additional attempts are intentionally unavailable pending explicit reconciliation. The workspace now exposes explicit agent selection, start and cancellation through these same local APIs. Account setup and activation remain separate operator actions. Follow up editing is not available.
+
+### Trusted verification and local application
+
+`GET /api/projects/{id}/agents` returns eligible project profile metadata without account or credential references. Select a profile before creating a task; legacy requests do not gain authority afterward. `GET /api/jobs/{id}/workflow` reports frozen profile scope, the owned attempt and configured verification state. Reading or refreshing never starts work.
+
+Version two configuration may define `verification_commands`, mapping a configured project ID to one trusted argument array. For example, `{"verification_commands":{"sample-api":["python3","-B","-m","unittest","discover"]}}` runs that configured check. The browser and provider cannot supply commands. These commands execute on the local Mac in the verified isolated worktree with a filtered environment; they are not a security sandbox. Configure them only for trusted projects and dependencies. Python isolated mode ignores environment bytecode settings, so include `-B` when that check must not create cache files.
+
+The workspace displays the exact configured command before Run trusted check. Its request binds the current command authorization hash, and admission is recorded before execution. Duplicate or uncertain requests do not run that command again. A deliberately corrected configuration can authorize a new check while retaining previous evidence, but any earlier unfinished check blocks another command. Successful evidence is bound to the changed text inventory before and after execution and to the actual review scan. Missing, failed, changed or incomplete evidence cannot authorize a native task's review readiness. A passing command proves only what its checks cover.
+
+Scan changes for review records readiness separately from verification. The existing frozen diff and approval controls then bind the exact snapshot, ID and expiry. Approve records permission only. Apply approved patch locally is a separate explicit action that uses the existing live content and clean target checks. A lost acknowledgement reads stored state; an uncertain application is never resubmitted automatically. Local application does not commit, push or publish code.
 
 `POST /api/jobs/{id}/plan` records a deterministic demo planning preview through the durable job and event lifecycle. `GET /api/jobs/{id}/plan` returns the same plan block after a restart, and the event stream can replay it. The preview does not inspect repository files, create a worktree or authorize execution. Native provider planning remains a separate integration step.
 
@@ -90,7 +100,7 @@ Current foundation includes the runtime home boundary, initial local directories
 
 ## Development quick start
 
-The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, stored task history, explicitly labeled demo planning, isolated worktree creation, live ledger events and frozen review decisions. Runtime selection in this shell records a requested preference; native start requires the separate explicit agent and execution APIs above. Follow up chat and provider quota are not available.
+The browser workspace is available at `http://127.0.0.1:8765/` after starting the server below. It provides project navigation, task creation, explicitly labeled demo planning, isolated worktrees, native execution controls, configured verification, live events, frozen review and approved local application. Runtime selection alone records a preference; execution requires a project agent selected before submission and a separate Start action. Follow up chat and provider quota are not available.
 
 Selection is restored from project and task identifiers in the URL. Reload replays the durable ledger, while drafts remain only in the open page and are never written to browser storage. Task responses omit internal snapshots and absolute storage paths. The entire HTTP surface requires a loopback client and host, rejects foreign origins and cross site browser requests, and disables response caching. This is a single operator local application, not a multiuser authentication boundary.
 
@@ -131,14 +141,18 @@ The separate status reader uses outbound long polling. It does not expose the da
 After starting the local backend, run this command with your real user ID and explicitly selected project IDs:
 
 ```bash
-uv run python -m telegram_gateway --owner-id 123456789 --project sample-api --allow-metadata-egress
+AGENT_WORKBENCH_HOME=../working-local uv run python -m telegram_gateway --owner-id 123456789 --project sample-api --allow-metadata-egress
 ```
 
 The placeholder ID is not a working configuration. Enter the bot token at the hidden terminal prompt. It remains in process memory and is not saved or passed through command arguments. The reader accepts `/start`, `/help` and `/status` only from that user in their matching private chat. It ignores other users, groups, forwarded messages, edited messages and commands older than two minutes. Stop it with Ctrl+C.
 
 Enabling this command explicitly permits aggregate counts for the selected public or private projects to leave the Mac for Telegram. Replies use numbered project aliases, not names, task content, diffs, credentials or account details. Internal and restricted project counts are withheld. Telegram bot messages are cloud messages, not Secret Chats, so this is not an end to end encrypted transport.
 
-This pilot cannot create, run, stop, resume or approve tasks. The Mac must be awake and both the backend and reader must be running. A transport error stops the reader rather than blindly retrying a send. Update deduplication is in memory; a quick restart may repeat a recent status reply, never a task action. Durable command journaling, credential storage and unattended startup are separate prerequisites for future remote execution. Do not share the bot with another poller or webhook consumer.
+The command verifies the bot's stable identity and stores receipt hashes, fixed expiry, scope and reply state in the same private runtime database. It records disposition before advancing the polling cursor. Exact duplicates survive restart; changed content under one update ID fails closed. Credentials and incoming message text are not stored. A new process polls from zero and deduplicates against receipts; after prolonged inactivity the cursor also resets because Telegram IDs are not permanently monotonic.
+
+Each reply freezes only the project scopes whose counts it contains and rechecks their current egress policy before dispatch. A durable send claim permits at most one automatic attempt. A lost or malformed acknowledgement, crash after claim or unconfirmed database acknowledgement retains uncertainty and is never automatically resent. Content free help and withheld notices remain available for local only projects. This favors avoiding duplicates over guaranteed delivery; reconciliation is manual. SQLite requests stronger synchronization for journal writes, but process restart tests do not establish hardware power loss guarantees.
+
+This pilot cannot create, run, stop, resume or approve tasks. The Mac must be awake and both the backend and reader must be running. Credential storage, unattended startup and remote task actions remain separate work. Do not share the bot with another poller or webhook consumer. The Python class retains an optional memory only mode for embedded read only use; the command above always uses durable storage.
 
 ## Provider capabilities
 

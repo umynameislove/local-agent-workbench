@@ -26,6 +26,7 @@ from db import (
     BackupService,
     BackupServiceError,
     Database,
+    DatabaseError,
     EventRepository,
     EventRepositoryError,
     JobNotFoundError,
@@ -41,6 +42,7 @@ from db import (
     UsageRepository,
     VerificationRepository,
 )
+from diff_service import DiffServiceError
 from engine import (
     APP_VERSION,
     RUNTIME_ENV,
@@ -96,9 +98,10 @@ from secret_gate import (
     SecretGateNotFoundError,
     SecretGateUnavailableError,
 )
+from task_workflow import TaskWorkflow, WorkflowConflictError
 from team_config import AgentSystem, TeamConfigError
 from team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
-from verification import VerificationRunner
+from verification import VerificationError, VerificationRunner
 from workspace_ui import asset
 from worktree import (
     WorktreeConflictError,
@@ -230,6 +233,9 @@ def create_app(
         app.state.verification_runner = VerificationRunner(
             app.state.job_repository,
             app.state.verification_repository,
+        )
+        app.state.task_workflow = TaskWorkflow(
+            app, configuration.verification_commands if configuration else {}
         )
         app.state.recovery_service = RecoveryService(database, runtime.worktrees)
         app.state.recovery_items = app.state.recovery_service.load()
@@ -437,7 +443,7 @@ def create_app(
             return HTTPException(status_code=404, detail="Project team or job does not exist.")
         if isinstance(error, TeamConfigError):
             return HTTPException(status_code=422, detail="Team or execution request is invalid.")
-        if isinstance(error, (TeamConflictError, NativeConflictError)):
+        if isinstance(error, (TeamConflictError, NativeConflictError, WorkflowConflictError)):
             return HTTPException(status_code=409, detail=str(error))
         return HTTPException(status_code=503, detail="Team or native execution is unavailable.")
 
@@ -455,6 +461,37 @@ def create_app(
         try:
             return request.app.state.team_repository.put(project_id, payload).to_dict()
         except (TeamStoreError, TeamConfigError) as error:
+            raise team_error(error) from error
+
+    @api.get("/api/projects/{project_id}/agents")
+    async def read_agents(request: Request, project_id: str) -> dict[str, object]:
+        try:
+            return request.app.state.task_workflow.agents(project_id)
+        except DatabaseError as error:
+            raise team_error(error) from error
+
+    @api.get("/api/jobs/{job_id}/workflow")
+    async def read_workflow(request: Request, job_id: str) -> dict[str, object]:
+        try:
+            return request.app.state.task_workflow.read(job_id)
+        except DatabaseError as error:
+            raise team_error(error) from error
+
+    @api.post("/api/jobs/{job_id}/verification")
+    async def verify_task(
+        request: Request, job_id: str, payload: Annotated[object, Body()]
+    ) -> dict[str, object]:
+        try:
+            return await request.app.state.task_workflow.verify(job_id, payload)
+        except (
+            DatabaseError,
+            WorkflowConflictError,
+            DiffServiceError,
+            VerificationError,
+            WorktreeConflictError,
+            WorktreeUnavailableError,
+            WorktreeNotFoundError,
+        ) as error:
             raise team_error(error) from error
 
     @api.get("/api/jobs/{job_id}/execution")
@@ -526,7 +563,18 @@ def create_app(
     async def review_readiness(request: Request, job_id: str) -> dict[str, object]:
         service: PreReviewSecretGate = request.app.state.secret_gate
         try:
-            return (await service.evaluate(job_id)).to_dict()
+            digest = await request.app.state.task_workflow.require_verified(job_id)
+            return (await service.evaluate(job_id, expected_digest=digest)).to_dict()
+        except WorkflowConflictError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except (
+            DatabaseError,
+            DiffServiceError,
+            WorktreeConflictError,
+            WorktreeNotFoundError,
+            WorktreeUnavailableError,
+        ) as error:
+            raise team_error(error) from error
         except SecretGateNotFoundError as error:
             raise HTTPException(status_code=404, detail=str(error)) from error
         except SecretGateBlockedError as error:

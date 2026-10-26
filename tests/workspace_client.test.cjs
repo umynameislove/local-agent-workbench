@@ -132,7 +132,7 @@ test("operations show stored counts, unknown execution and attention first witho
   assert.equal(h.node("control-queued").textContent, "0");
   assert.equal(h.node("task-list").children[0].dataset.job, "older");
   assert.equal(h.node("runtime-roster").children.length, 4);
-  assert.match(h.node("runtime-roster").children[1].children[1].textContent, /1 recorded requests · Execution not connected/);
+  assert.match(h.node("runtime-roster").children[1].children[1].textContent, /1 recorded requests · Recorded preference, not live execution/);
   assert.equal(h.calls.some((call) => call.init.method !== "GET"), false);
 });
 
@@ -701,4 +701,97 @@ test("switching to a task without review clears the prior disclosure and evidenc
   assert.equal(h.node("review-view").textContent, "View unified diff");
   assert.equal(h.node("review-view")["aria-expanded"], "false");
   assert.equal(h.node("review-patches").children.length, 0);
+});
+
+const executionFixture = (id = "A", state = "queued") => ({
+  job_id: id, project_id: "alpha", job_state: state,
+  agent: {id: "coder", role: "implementer", runtime: "codex", model: "configured", write_paths: ["."]},
+  execution: {job_id: id, enabled: true, authorization_hash: "a".repeat(64), attempt: null, requires_reconciliation: false},
+  verification: {authorization_hash: "b".repeat(64), command: ["trusted-check"], status: "not_started", result_id: null},
+});
+
+test("project agent selection is frozen in submission and never inferred from a runtime preference", async () => {
+  const h = harness({handle: (url) => url === "/api/projects/alpha/agents"
+    ? {ok: true, status: 200, json: async () => ({project_id: "alpha", agents: [{id: "coder", runtime: "codex", role: "implementer", model: "configured"}]})} : undefined});
+  await flush();
+  h.node("agent").value = "coder"; await h.node("agent").fire("change");
+  h.node("prompt").value = "Bounded task"; await h.node("prompt").fire("input");
+  assert.equal(h.node("runtime").disabled, true);
+  await h.node("composer").fire("submit"); await flush();
+  assert.deepEqual(decisionBody(h), {project_id: "alpha", request: "Bounded task", runtime: "auto", agent_id: "coder"});
+  assert.equal(writes(h).some((c) => c.url.endsWith("/execution")), false);
+});
+
+for (const [kind, state, observed] of [["start", "queued", true], ["verify", "verifying", true], ["verify", "verifying", false]]) {
+  test(`lost ${kind} response with observed=${observed} is reconciled without automatic retry`, async () => {
+    const f = executionFixture("A", state);
+    const h = harness({jobs: [{...job("A"), state, worktree_ready: true}]});
+    h.handle((url, init) => {
+      if (url.endsWith("/workflow")) return h.response(structuredClone(f));
+      if (init.method === "POST") {
+        if (observed && kind === "start") f.execution.attempt = {attempt_id: "one", phase: "running", cancel_requested: false};
+        if (observed && kind === "verify") f.verification.status = "uncertain";
+        return Promise.reject(new Error("lost"));
+      }
+    });
+    await flush(); await h.clickTask("A");
+    await h.node(`execution-${kind}`).fire("click"); await flush();
+    await h.node("execution-reload").fire("click"); await h.node(`execution-${kind}`).fire("click");
+    assert.equal(writes(h).length, 1);
+    assert.equal(h.node(`execution-${kind}`).disabled, true);
+  });
+}
+
+test("a late execution response cannot replace another task or lose the first task's pending lock", async () => {
+  const pending = deferred(), f = executionFixture();
+  const h = harness({jobs: [{...job("A"), state: "queued", worktree_ready: true}, job("B")]});
+  h.handle((url, init) => {
+    if (url.endsWith("/workflow")) return h.response(structuredClone({...f, job_id: url.includes("/B/") ? "B" : "A", execution: {...f.execution, job_id: url.includes("/B/") ? "B" : "A"}}));
+    if (init.method === "POST") return pending.promise;
+  });
+  await flush(); await h.clickTask("A");
+  const action = h.node("execution-start").fire("click");
+  await h.clickTask("B"); await h.clickTask("A");
+  assert.equal(h.node("execution-start").disabled, true);
+  f.execution.attempt = {attempt_id: "one", phase: "running", cancel_requested: false};
+  pending.reject(new Error("lost")); await action; await flush();
+  await h.node("execution-reload").fire("click");
+  assert.equal(writes(h).length, 1);
+  assert.equal(h.node("execution-start").disabled, true);
+});
+
+test("unreadable workflow and legacy tasks never gain native start authority", async () => {
+  const f = executionFixture(); f.agent = null;
+  const h = harness({jobs: [{...job("A"), state: "queued", worktree_ready: true}]});
+  h.handle((url) => url.endsWith("/workflow") ? h.response(structuredClone(f)) : undefined);
+  await flush(); await h.clickTask("A");
+  assert.equal(h.node("execution-start").hidden, true);
+  f.execution.authorization_hash = "wrong";
+  await h.node("execution-reload").fire("click");
+  assert.equal(h.node("execution-start").disabled, true);
+  assert.equal(writes(h).length, 0);
+});
+
+test("approval and local application remain separate; a lost apply response reconciles once", async () => {
+  const h = await reviewHarness();
+  h.approval.state = "decided"; h.approval.decision = "approved"; h.approval.decided_at = instant;
+  h.status.job_state = "approved"; h.jobs.get("A").state = "approved";
+  await h.node("review-reload").fire("click");
+  assert.equal(h.node("review-apply").disabled, true);
+  await enableDecision(h);
+  assert.equal(h.node("review-apply").disabled, false);
+  assert.equal(writes(h).length, 0);
+  h.intercept((url, init) => {
+    if (url.endsWith("/promote") && init.method === "POST") {
+      h.status.job_state = "completed"; h.jobs.get("A").state = "completed";
+      return Promise.reject(new Error("lost acknowledgement"));
+    }
+  });
+  await h.node("review-apply").fire("click"); await flush();
+  await h.node("review-apply").fire("click");
+  assert.equal(writes(h).length, 1);
+  assert.equal(writes(h)[0].url, "/api/approvals/permission-A/promote");
+  assert.deepEqual(decisionBody(h), {bundle_hash: h.snapshot.bundle_hash});
+  assert.equal(h.node("review-apply").disabled, true);
+  assert.match(h.node("review-message").textContent, /applied locally/);
 });

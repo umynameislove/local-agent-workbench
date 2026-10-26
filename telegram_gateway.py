@@ -11,6 +11,10 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from db import Database, DatabaseError
+from engine import ConfigurationError, resolve_runtime_home
+from remote_commands import RemoteJournal, RemoteJournalError
+
 
 class GatewayError(RuntimeError):
     """A sanitized transport or control status failure."""
@@ -45,6 +49,7 @@ class TelegramGateway:
         port: int = 8765,
         read_json: Callable[[Request, int], object] = _read_json,
         clock: Callable[[], float] = time.time,
+        journal: RemoteJournal | None = None,
     ) -> None:
         if not re.fullmatch(r"[0-9]{5,20}:[A-Za-z0-9_-]{20,128}", token):
             raise GatewayError("Bot token format is invalid.")
@@ -66,6 +71,21 @@ class TelegramGateway:
         self.owner_id, self.projects, self.port = owner_id, tuple(projects), port
         self._read_json, self._clock = read_json, clock
         self.offset = 0
+        self._last_update = self._clock()
+        self._journal = journal
+        self._scope = RemoteJournal.scope(owner_id, self.projects, port)
+        self._channel = None
+        if journal is not None:
+            bot = self._telegram("getMe", {})
+            if (
+                not isinstance(bot, dict)
+                or type(bot.get("id")) is not int
+                or bot["id"] != int(token.split(":", 1)[0])
+                or bot.get("is_bot") is not True
+            ):
+                raise GatewayError("Bot identity could not be verified.")
+            self._channel = str(bot["id"])
+            journal.recover(self._channel)
 
     def _telegram(self, method: str, payload: dict[str, object]) -> object:
         request = Request(
@@ -80,6 +100,7 @@ class TelegramGateway:
         return response.get("result")
 
     def status(self) -> str:
+        self._egress_projects = []
         lines = ["Local Agent Workbench", "Recorded task states, not live agent health."]
         for index, project in enumerate(self.projects, start=1):
             query = urlencode({"project_id": project})
@@ -105,6 +126,7 @@ class TelegramGateway:
             ):
                 raise GatewayError("Local status is invalid. Status withheld.")
             lines.append(f"Project {index}: {total} stored tasks, {attention} need attention.")
+            self._egress_projects.append(project)
         lines.append("Quota unknown. Run, stop and approval commands are unavailable.")
         return "\n".join(lines)
 
@@ -129,6 +151,8 @@ class TelegramGateway:
         return text if text in ("/start", "/help", "/status") else None
 
     def poll_once(self) -> None:
+        if self._clock() - self._last_update >= 6 * 86400:
+            self.offset = 0
         updates = self._telegram(
             "getUpdates",
             {
@@ -144,9 +168,14 @@ class TelegramGateway:
             if not isinstance(update, dict) or type(update.get("update_id")) is not int:
                 raise GatewayError("Telegram update identity is invalid.")
             update_id = update["update_id"]
-            if update_id < 0:
+            if not 0 <= update_id < 2**63 - 1:
                 raise GatewayError("Telegram update identity is invalid.")
-            if update_id < self.offset:
+            if update_id < self.offset and self._journal is None:
+                continue
+            if self._journal is not None:
+                self._durable_update(update)
+                self.offset = max(self.offset, update_id + 1)
+                self._last_update = self._clock()
                 continue
             self.offset = update_id + 1
             command = self._command(update)
@@ -165,6 +194,88 @@ class TelegramGateway:
                     "This bot cannot run, stop or approve tasks."
                 )
             self._telegram("sendMessage", {"chat_id": self.owner_id, "text": text})
+
+    def _reply(self, command: str) -> str:
+        self._egress_projects = []
+        if command != "/status":
+            return (
+                "Use /status for counts in your selected projects. "
+                "This bot cannot run, stop or approve tasks."
+            )
+        try:
+            return self.status()
+        except GatewayError:
+            self._egress_projects = []
+            return "Local status unavailable. Check the Mac and backend. No task was changed."
+
+    def _durable_update(self, update: dict) -> None:
+        journal, channel = self._journal, self._channel
+        assert journal is not None and channel is not None
+        try:
+            receipt, new = journal.receive(channel, update, self._scope, int(self._clock()))
+            identity = update["update_id"]
+            if new:
+                command = self._command(update)
+                receipt = journal.complete(
+                    channel,
+                    identity,
+                    None if command is None else self._reply(command),
+                    egress=tuple(self._egress_projects) if command is not None else (),
+                )
+            if receipt["phase"] != "ready":
+                return
+            # Recheck egress before a stored reply can leave this process.
+            permitted = self._command(update) is not None
+            try:
+                reply = json.loads(receipt["reply"])
+                if (
+                    set(reply) != {"text", "projects"}
+                    or not isinstance(reply["text"], str)
+                    or not isinstance(reply["projects"], list)
+                    or any(p not in self.projects for p in reply["projects"])
+                ):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise GatewayError("Stored reply scope is invalid.") from None
+            for project in reply["projects"]:
+                query = urlencode({"project_id": project})
+                current = self._read_json(
+                    Request(f"http://127.0.0.1:{self.port}/api/control?{query}"), 5
+                )
+                permitted = (
+                    permitted
+                    and isinstance(current, dict)
+                    and current.get("project_id") == project
+                    and current.get("sensitivity") in {"public", "private"}
+                )
+            receipt = journal.claim(
+                channel, identity, self._scope if permitted else "revoked", int(self._clock())
+            )
+            if receipt is None:
+                return
+            try:
+                message = self._telegram(
+                    "sendMessage", {"chat_id": self.owner_id, "text": reply["text"]}
+                )
+                if (
+                    not isinstance(message, dict)
+                    or type(message.get("message_id")) is not int
+                    or not isinstance(message.get("chat"), dict)
+                    or message["chat"].get("id") != self.owner_id
+                    or message["chat"].get("type") != "private"
+                ):
+                    raise GatewayError("Telegram send outcome is unconfirmed.")
+                journal.finish(channel, identity, message["message_id"])
+            except (GatewayError, RemoteJournalError):
+                if journal.get(channel, identity)["phase"] == "sending":
+                    journal.finish(channel, identity, None)
+                raise GatewayError(
+                    "Reply outcome needs reconciliation. It will not be resent."
+                ) from None
+        except RemoteJournalError:
+            raise GatewayError(
+                "Remote command state needs reconciliation. No command was replayed."
+            ) from None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -185,15 +296,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error("Use an interactive terminal. Never pass tokens in arguments or a pipe.")
     print("Telegram will receive aggregate counts for the selected projects. Keep the Mac awake.")
     try:
+        runtime = resolve_runtime_home()
+        runtime.bootstrap()
+        database = Database(runtime.state_db)
+        database.initialize()
         gateway = TelegramGateway(
-            getpass.getpass("Bot token (not stored): "), args.owner_id, args.project, port=args.port
+            getpass.getpass("Bot token (not stored): "),
+            args.owner_id,
+            args.project,
+            port=args.port,
+            journal=RemoteJournal(database),
         )
         print("Status reader started. Press Ctrl+C to stop. No execution commands are enabled.")
         while True:
             gateway.poll_once()
     except (KeyboardInterrupt, EOFError):
         return 0
-    except GatewayError:
+    except (GatewayError, DatabaseError, ConfigurationError):
         print(
             "Status reader stopped after an error. Check configuration and connectivity.",
             file=sys.stderr,

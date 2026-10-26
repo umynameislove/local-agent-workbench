@@ -11,7 +11,7 @@ from test_job_submission import initialize_repository
 from test_team_config import team_configuration
 
 from app import create_app
-from db import MIGRATIONS, Database, ProjectRepository
+from db import LATEST_SCHEMA_VERSION, MIGRATIONS, Database, ProjectRepository
 from engine import WorkbenchConfig
 from team_config import TeamConfigError
 from team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
@@ -86,12 +86,12 @@ def test_corruption_is_detected_and_hidden_project_is_not_readable(tmp_path):
 
 
 def test_schema_upgrade_preserves_old_projects_and_rolls_back_failed_migration(tmp_path):
-    database = Database(tmp_path / "state.db", migrations=MIGRATIONS[:-1])
+    database = Database(tmp_path / "state.db", migrations=MIGRATIONS[:12])
     assert database.initialize() == 12
     old = WorkbenchConfig.from_dict(team_configuration()).projects[0]
     ProjectRepository(database).create(old)
     latest = Database(database.path)
-    assert latest.initialize() == 13
+    assert latest.initialize() == LATEST_SCHEMA_VERSION
     assert ProjectRepository(latest).get(old.id).to_config() == old
 
 
