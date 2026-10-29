@@ -6,6 +6,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     "review-hash", "review-base", "review-id", "review-expiry", "review-decision", "review-files",
     "review-checks", "review-risks", "review-diff", "review-patches", "review-view", "review-prepare",
     "review-request", "review-approve", "review-changes", "review-reject", "review-reload", "review-apply",
+    "review-summary", "checks-snapshot",
   ].map((id) => [id, document.getElementById(id)]));
   const decisions = new Set(["approved", "changes_requested", "rejected"]);
   const busy = new Set(), uncertain = new Map(), deadlines = new Map();
@@ -57,10 +58,12 @@ window.WorkbenchReview = ({request, onChange}) => {
     else if (active()) message = "Review the ID, scope and expiry below. Each decision is checked against the live worktree.";
     else if (canPrepare()) message = "Review readiness is recorded. Prepare a frozen snapshot; this does not request approval.";
     if (ui["review-message"].textContent !== message) ui["review-message"].textContent = message;
+    ui["review-summary"].textContent = job && status ? `${message}${bundle ? ` Snapshot ${bundle.bundle_hash.slice(0, 12)}.` : ""}${approval && !approval.decision ? ` Expires ${new Date(approval.expires_at).toLocaleString()}.` : ""}` : "";
   };
   const renderEvidence = () => {
     ui.review.hidden = !job;
     ui["review-content"].hidden = !bundle;
+    ui["checks-snapshot"].textContent = bundle ? `Frozen snapshot ${bundle.bundle_hash}. These checks are immutable bundle evidence; current workflow state is separate below.` : "No frozen snapshot loaded. Current workflow state is separate below.";
     if (!bundle) {
       renderedHash = null; ui["review-diff"].hidden = true;
       ui["review-view"].textContent = "View unified diff";
@@ -340,16 +343,27 @@ window.WorkbenchExecution = ({request, onChange}) => {
     "policy", "cloud", "requested-runtime", "worktree", "action-title", "action-description",
     "next-action", "header-action", "refresh", "composer", "composer-wrap",
     "control-status", "control-attention", "control-queued", "control-total", "runtime-roster",
-    "layout", "view-projects", "view-workspace", "view-operations", "agent",
+    "layout", "view-projects", "view-workspace", "view-operations", "agent", "task-tabs",
+    "tab-activity", "tab-changes", "tab-checks", "panel-activity", "panel-changes", "panel-checks",
+    "task-search", "attention-filter", "history-heading",
   ].map((id) => [id, $(id)]));
   const state = {
     projects: [], project: null, job: null, selected: null, jobs: new Map(), listed: new Set(), cursor: null,
     drafts: new Map(), selections: new Map(), projectEpoch: 0, taskEpoch: 0,
     listEpoch: 0, detailEpoch: 0, stream: null, lastEvent: 0n, events: 0,
     creating: false, actions: new Set(), loadingOlder: false, pagesLoaded: 0, ready: false, controlEpoch: 0,
-    agents: [], agentsLoading: false,
+    agents: [], agentsLoading: false, agentEpoch: 0, tab: "activity", version: null,
   };
   const attentionStates = new Set(["waiting_input", "waiting_approval", "review_ready", "blocked", "failed"]);
+  const tabs = ["activity", "changes", "checks"];
+  const selectTab = (name) => {
+    state.tab = name;
+    for (const tab of tabs) {
+      ui[`tab-${tab}`].setAttribute("aria-selected", String(name === tab));
+      ui[`tab-${tab}`].tabIndex = name === tab ? 0 : -1;
+      ui[`panel-${tab}`].hidden = name !== tab;
+    }
+  };
   const label = (value) => String(value || "Unknown").replaceAll("_", " ");
   const showPanel = (panel) => {
     ui.layout.dataset.view = panel;
@@ -401,6 +415,9 @@ window.WorkbenchExecution = ({request, onChange}) => {
     ui.notice.textContent = message;
     ui.notice.hidden = !message;
   };
+  const backendContact = () => {
+    ui.health.textContent = `Last backend response ${new Date().toLocaleTimeString()}${state.version ? ` · v${state.version}` : ""}`;
+  };
   const request = async (path, payload) => {
     let response;
     try {
@@ -410,8 +427,10 @@ window.WorkbenchExecution = ({request, onChange}) => {
         body: payload === undefined ? undefined : JSON.stringify(payload),
       });
     } catch {
+      ui.health.textContent = "Backend connection unavailable. Displayed data may be stale.";
       throw new Error("Connection lost. Refresh task history before trying the action again; it may already have succeeded.");
     }
+    backendContact();
     let data;
     try { data = await response.json(); }
     catch { throw new Error("The backend returned an unreadable response. Refresh state to reconcile the task."); }
@@ -425,23 +444,32 @@ window.WorkbenchExecution = ({request, onChange}) => {
     && job.project_id === project && typeof job.state === "string" && typeof job.title === "string";
   const review = window.WorkbenchReview({request, onChange: () => loadDetail()});
   const execution = window.WorkbenchExecution({request, onChange: () => loadDetail()});
+  const projectControl = window.WorkbenchProjectControl({request,
+    onSelect: (project, job) => project === state.project ? selectTask(job) : selectProject(project, job),
+    onSaved: (project) => { if (project === state.project) loadAgents(); },
+  });
   const loadAgents = async () => {
-    const project = state.project, epoch = state.projectEpoch;
+    const project = state.project, epoch = state.projectEpoch, reading = ++state.agentEpoch;
     state.agents = []; state.agentsLoading = true; ui.agent.replaceChildren(); renderTask();
     const option = (value, title) => { const item = document.createElement("option"); item.value = value; item.textContent = title; return item; };
     ui.agent.append(option("", "Record only, no worker"));
     try {
       const data = await request(`/api/projects/${encodeURIComponent(project)}/agents`);
-      if (epoch !== state.projectEpoch) return;
+      if (epoch !== state.projectEpoch || reading !== state.agentEpoch) return;
       if (data?.project_id !== project || !Array.isArray(data.agents)
         || data.agents.some((a) => typeof a?.id !== "string" || a.runtime !== "codex" || a.role !== "implementer")) throw new Error("Project agents unavailable.");
       state.agents = data.agents;
       for (const a of data.agents) ui.agent.append(option(a.id, `${a.id} · ${a.runtime} · ${a.model || "Native default"}`));
-    } catch { if (epoch === state.projectEpoch) state.agents = []; }
+    } catch { if (epoch === state.projectEpoch && reading === state.agentEpoch) state.agents = []; }
     finally {
-      if (epoch === state.projectEpoch) {
+      if (epoch === state.projectEpoch && reading === state.agentEpoch) {
         state.agentsLoading = false;
-        ui.agent.value = state.agents.some((a) => a.id === draft().agent) ? draft().agent : "";
+        const selected = draft().agent;
+        if (selected && !state.agents.some((a) => a.id === selected)) {
+          const missing = option(selected, `${selected} · Unavailable, choose another profile`);
+          missing.disabled = true; ui.agent.append(missing);
+        }
+        ui.agent.value = selected || "";
         renderTask();
       }
     }
@@ -466,11 +494,15 @@ window.WorkbenchExecution = ({request, onChange}) => {
     for (const project of state.projects) {
       const button = document.createElement("button"); button.type = "button"; button.className = "project";
       button.setAttribute("aria-current", String(project.id === state.project));
+      button.setAttribute("aria-expanded", String(project.id === state.project));
       button.append(document.createTextNode(project.id));
       const meta = document.createElement("small");
       meta.textContent = `${label(project.sensitivity)} · ${project.cloud_allowed ? "Cloud permitted" : "Cloud blocked"}`;
       button.append(meta); button.addEventListener("click", () => selectProject(project.id));
+      const query = ui["task-search"].value.trim().toLocaleLowerCase();
+      button.hidden = Boolean(query) && !project.id.toLocaleLowerCase().includes(query) && project.id !== state.project;
       ui["project-list"].append(button);
+      if (project.id === state.project) ui["project-list"].append(ui["task-list"]);
     }
     ui["project-empty"].hidden = state.projects.length !== 0;
     ui["new-task"].disabled = !state.project;
@@ -478,7 +510,9 @@ window.WorkbenchExecution = ({request, onChange}) => {
   const renderTasks = () => {
     const focused = document.activeElement?.dataset.job;
     ui["task-list"].replaceChildren();
-    const jobs = [...state.jobs.values()].sort((a, b) =>
+    const query = ui["task-search"].value.trim().toLocaleLowerCase();
+    const jobs = [...state.jobs.values()].filter((job) => (!ui["attention-filter"].checked || attentionStates.has(job.state))
+      && (!query || `${state.project} ${job.title} ${job.id}`.toLocaleLowerCase().includes(query))).sort((a, b) =>
       Number(attentionStates.has(b.state)) - Number(attentionStates.has(a.state))
       || b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id));
     for (const job of jobs) {
@@ -495,6 +529,8 @@ window.WorkbenchExecution = ({request, onChange}) => {
     }
     ui["task-empty"].hidden = jobs.length !== 0;
     ui["task-empty"].textContent = state.project ? "No tasks yet. Create your first task." : "Choose a project to see its tasks.";
+    if (!jobs.length && state.jobs.size) ui["task-empty"].textContent = "No loaded tasks match these filters.";
+    ui["history-heading"].textContent = state.project ? `Tasks in ${state.project}` : "Tasks in selected project";
     ui["load-older"].hidden = !state.cursor;
     ui["load-older"].disabled = state.loadingOlder;
   };
@@ -531,6 +567,7 @@ window.WorkbenchExecution = ({request, onChange}) => {
     ui.attention.textContent = job ? `Needs you: ${label(job.state)}. See the next step below.` : "";
     ui.welcome.hidden = Boolean(state.selected);
     ui.transcript.hidden = !job;
+    ui["task-tabs"].hidden = !job;
     ui["request-text"].textContent = job ? job.request : "";
     ui["context-title"].textContent = project ? project.id : "No project selected";
     ui.policy.textContent = project ? `${label(project.sensitivity)} · ${label(project.permission_mode)}` : "Not available";
@@ -551,11 +588,13 @@ window.WorkbenchExecution = ({request, onChange}) => {
     ui["composer-wrap"].dataset.mode = ui.composer.dataset.mode;
     ui.prompt.disabled = !editable; ui.runtime.disabled = !editable || Boolean(ui.agent.value);
     ui.agent.disabled = !editable || state.agentsLoading;
-    ui["create-task"].disabled = !editable || state.agentsLoading || !ui.prompt.value.trim();
+    const unavailableAgent = Boolean(ui.agent.value) && !state.agents.some((a) => a.id === ui.agent.value);
+    ui["create-task"].disabled = !editable || state.agentsLoading || unavailableAgent || !ui.prompt.value.trim();
     ui["create-task"].textContent = state.creating ? "Creating…" : "Create task ↗";
     ui["composer-help"].textContent = state.selected
       ? "This is a recorded task. Follow up chat is not connected yet. Choose New task to create a separate request."
       : state.creating ? "Creating one task. If the connection drops, inspect task history before submitting again."
+      : unavailableAgent ? "The selected profile is unavailable. Explicitly choose another profile or Record only before submitting."
       : "Select a configured project agent for native work, or record a request only. Creating a task never starts execution or paid inference.";
   };
   const loadTasks = async (older = false) => {
@@ -650,6 +689,7 @@ window.WorkbenchExecution = ({request, onChange}) => {
     if (id === state.selected && state.job) { loadDetail(); return; }
     stopStream(); clearTimeout(detailTimer); state.taskEpoch += 1;
     state.selected = id; state.job = null; state.selections.set(state.project, id);
+    selectTab("activity");
     review.select(null);
     execution.select(null);
     clearActivity(); tell(); setURL();
@@ -663,6 +703,7 @@ window.WorkbenchExecution = ({request, onChange}) => {
     state.projectEpoch += 1; state.jobs = new Map(); state.listed = new Set(); state.cursor = null;
     state.loadingOlder = false; state.pagesLoaded = 0;
     state.project = id; renderProjects();
+    projectControl.select(id);
     loadAgents();
     resetControl("Loading project activity…"); loadControl();
     selectTask(initialTask === undefined ? state.selections.get(id) || null : initialTask);
@@ -699,8 +740,8 @@ window.WorkbenchExecution = ({request, onChange}) => {
   const performAction = async () => {
     const action = nextStep()[2], id = state.selected, epoch = state.taskEpoch;
     if (!action || state.actions.has(id)) return;
-    if (action === "review") { review.focus(); return; }
-    if (action === "execution") { execution.focus(); return; }
+    if (action === "review") { showPanel("workspace"); selectTab("changes"); review.focus(); return; }
+    if (action === "execution") { showPanel("workspace"); selectTab("checks"); execution.focus(); return; }
     state.actions.add(id); tell(); renderTask();
     try {
       await request(`/api/jobs/${encodeURIComponent(id)}/${action}`, {});
@@ -709,7 +750,7 @@ window.WorkbenchExecution = ({request, onChange}) => {
     finally { state.actions.delete(id); if (epoch === state.taskEpoch) renderTask(); }
   };
   const refresh = async () => {
-    tell(); loadControl(); await loadTasks(); await loadDetail();
+    tell(); loadControl(); projectControl.refresh(); await loadTasks(); await loadDetail();
   };
   ui.prompt.addEventListener("input", () => { draft().text = ui.prompt.value; renderTask(); });
   ui.runtime.addEventListener("change", () => { draft().runtime = ui.runtime.value; });
@@ -725,6 +766,16 @@ window.WorkbenchExecution = ({request, onChange}) => {
   ui["next-action"].addEventListener("click", performAction);
   ui["header-action"].addEventListener("click", performAction);
   ui.refresh.addEventListener("click", refresh);
+  ui["task-search"].addEventListener("input", () => { renderProjects(); renderTasks(); });
+  ui["attention-filter"].addEventListener("change", renderTasks);
+  for (const tab of tabs) {
+    ui[`tab-${tab}`].addEventListener("click", () => selectTab(tab));
+    ui[`tab-${tab}`].addEventListener("keydown", (event) => {
+      const index = tabs.indexOf(tab), next = event.key === "ArrowRight" ? (index + 1) % 3
+        : event.key === "ArrowLeft" ? (index + 2) % 3 : event.key === "Home" ? 0 : event.key === "End" ? 2 : null;
+      if (next !== null) { event.preventDefault(); selectTab(tabs[next]); ui[`tab-${tabs[next]}`].focus(); }
+    });
+  }
   for (const panel of ["projects", "workspace", "operations"]) {
     ui[`view-${panel}`].addEventListener("click", () => showPanel(panel));
   }
@@ -733,7 +784,7 @@ window.WorkbenchExecution = ({request, onChange}) => {
     try {
       const data = await request("/api/bootstrap");
       state.projects = data.projects; state.ready = true; renderProjects();
-      ui.health.textContent = `Local backend connected · v${data.version}`;
+      state.version = data.version; backendContact();
       const params = new URLSearchParams(location.search);
       const project = state.projects.find((item) => item.id === params.get("project")) || state.projects[0];
       if (project) await selectProject(project.id, params.get("task"));
@@ -741,5 +792,5 @@ window.WorkbenchExecution = ({request, onChange}) => {
     } catch (error) { ui.health.textContent = "Local backend unavailable"; tell(error.message); }
   };
   initialize();
-  setInterval(() => { if (!document.hidden && state.ready && !state.loadingOlder) { loadTasks(); loadDetail(); loadControl(); } }, 10000);
+  setInterval(() => { if (!document.hidden && state.ready && !state.loadingOlder) { loadTasks(); loadDetail(); loadControl(); projectControl.refresh(); } }, 10000);
 })();
