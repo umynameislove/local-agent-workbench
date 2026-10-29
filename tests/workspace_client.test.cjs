@@ -7,6 +7,7 @@ const vm = require("node:vm");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const code = fs.readFileSync(path.join(__dirname, "../workspace_ui/workspace.js"), "utf8");
+const projectCode = fs.readFileSync(path.join(__dirname, "../workspace_ui/project_control.js"), "utf8");
 const pendingDigests = new Set();
 const flush = async () => {
   for (let n = 0; n < 8; n++) {
@@ -43,6 +44,8 @@ function harness(options = {}) {
     addEventListener(name, callback) { this.listeners[name] = callback; }
     fire(name, extra = {}) { return this.listeners[name]?.({preventDefault() {}, ...extra}); }
     requestSubmit() { return this.fire("submit"); }
+    showModal() { this.open = true; }
+    close() { this.open = false; this.fire("close"); }
   }
   document.getElementById = (id) => {
     if (!nodes.has(id)) nodes.set(id, new Element(id));
@@ -112,10 +115,11 @@ function harness(options = {}) {
     clearTimeout(id) { timers.delete(id); }, setInterval(callback) { intervals.push(callback); },
   };
   document.getElementById("runtime").value = "auto";
+  vm.runInNewContext(projectCode, context, {filename: "project_control.js"});
   vm.runInNewContext(code, context, {filename: "workspace.js"});
   const node = (id) => nodes.get(id);
   const clickTask = async (id) => { await node("task-list").children.find((item) => item.dataset.job === id).fire("click"); await flush(); };
-  const clickProject = async (id) => { await node("project-list").children.find((item) => item.children[0].textContent === id).fire("click"); await flush(); };
+  const clickProject = async (id) => { await node("project-list").children.find((item) => item.tag === "button" && item.children[0]?.textContent === id).fire("click"); await flush(); };
   return {node, streams, calls, jobs, response, clickTask, clickProject,
     handle(callback) { handler = callback; }, url() { return currentURL; },
     type(value) { node("prompt").value = value; node("prompt").fire("input"); },
@@ -161,6 +165,19 @@ test("unreadable operations clear old counts and phone panels preserve the draft
   assert.equal(h.node("control-total").textContent, "…");
   assert.equal(h.node("runtime-roster").children.length, 0);
   assert.match(h.node("control-status").textContent, /unavailable/);
+  assert.equal(h.calls.some((call) => call.init.method !== "GET"), false);
+});
+
+test("backend contact reports failure and recovery without replaying an action", async () => {
+  const h = harness(); await flush(); h.type("Keep this request");
+  assert.match(h.node("health").textContent, /Last backend response.*vtest/);
+  h.handle(() => Promise.reject(new Error("Offline")));
+  await h.node("refresh").fire("click"); await flush();
+  assert.match(h.node("health").textContent, /connection unavailable.*may be stale/);
+  assert.equal(h.node("prompt").value, "Keep this request");
+  h.handle(null);
+  await h.node("refresh").fire("click"); await flush();
+  assert.match(h.node("health").textContent, /Last backend response.*vtest/);
   assert.equal(h.calls.some((call) => call.init.method !== "GET"), false);
 });
 
@@ -794,4 +811,229 @@ test("approval and local application remain separate; a lost apply response reco
   assert.deepEqual(decisionBody(h), {bundle_hash: h.snapshot.bundle_hash});
   assert.equal(h.node("review-apply").disabled, true);
   assert.match(h.node("review-message").textContent, /applied locally/);
+});
+
+const settingsValue = (id, revision = 1, enabled = true, ids = ["coder"]) => ({
+  project_id: id, revision, team: {project_id: id, enabled, agent_ids: ids},
+  profiles: ["coder", "reviewer"].map((name) => ({id: name, role: name === "coder" ? "implementer" : "reviewer",
+    runtime: "codex", model_id: "native", model: null, connection_id: "subscription",
+    connection_enabled: true, model_verified: true, eligible: true, executable: enabled && name === "coder",
+    reason: name === "coder" ? "Native supported" : "Execution unavailable"})),
+});
+const activityValue = (id, attempts = [], attention = []) => ({project_id: id,
+  observed_at: "2026-10-26T00:00:00Z", basis: "recorded_native_attempts", attempts, attention,
+  attention_total: attention.length, attempt_total: attempts.length,
+  attempts_truncated: false, attention_truncated: false});
+const reply = (data, status = 200) => ({ok: status < 400, status, json: async () => data});
+const projectHandle = (url) => {
+  const match = url.match(/^\/api\/projects\/([^/]+)\/(settings|activity)$/);
+  return match ? reply(match[2] === "settings" ? settingsValue(match[1]) : activityValue(match[1])) : undefined;
+};
+
+test("task tabs use synchronous visibility and keyboard navigation without new requests", async () => {
+  const h = harness({handle: projectHandle}); await flush(); await h.clickTask("A");
+  assert.equal(h.node("task-tabs").hidden, false);
+  const count = h.calls.length;
+  h.node("tab-changes").fire("click");
+  assert.equal(h.node("panel-changes").hidden, false);
+  assert.equal(h.node("panel-activity").hidden, true);
+  h.node("tab-changes").fire("keydown", {key: "ArrowRight"});
+  assert.equal(h.node("tab-checks")["aria-selected"], "true");
+  assert.equal(h.node("tab-checks").tabIndex, 0);
+  assert.equal(h.node("tab-activity").tabIndex, -1);
+  assert.equal(h.calls.length, count);
+  await h.advance(10000);
+  assert.equal(h.node("panel-checks").hidden, false);
+  h.node("tab-checks").fire("keydown", {key: "Home"});
+  assert.equal(h.node("tab-activity")["aria-selected"], "true");
+});
+
+test("project grouping and loaded task filters never retarget the draft", async () => {
+  const h = harness({handle: projectHandle}); await flush(); h.type("Do not retarget");
+  assert.equal(h.node("task-list").parent, h.node("project-list"));
+  h.node("task-search").value = "B"; h.node("task-search").fire("input");
+  assert.deepEqual(h.node("task-list").children.map((n) => n.dataset.job), ["B"]);
+  h.node("attention-filter").checked = true; h.node("attention-filter").fire("change");
+  assert.equal(h.node("task-list").children.length, 0);
+  assert.match(h.node("task-empty").textContent, /filters/);
+  assert.equal(new URL(h.url()).searchParams.get("project"), "alpha");
+  assert.equal(h.node("prompt").value, "Do not retarget");
+  assert.equal(h.calls.some((c) => c.init.method !== "GET"), false);
+});
+
+test("recorded attempts and configured profiles stay separate with exact task links", async () => {
+  const attempt = {project_id: "alpha", job_id: "A", attempt_id: "owned", title: "Frozen task",
+    profile_id: "old-profile", runtime: "codex", phase: "reconcile", cancel_requested: true,
+    requires_reconciliation: true, outcome: null, last_event_at: "2026-10-26T00:00:00Z"};
+  const h = harness({handle: (url) => url.endsWith("/alpha/activity")
+    ? reply(activityValue("alpha", [attempt])) : projectHandle(url)});
+  await flush();
+  assert.equal(h.node("project-team").children.length, 1);
+  assert.equal(h.node("attempt-list").children.length, 1);
+  assert.match(h.node("attempt-list").children[0].children[1].textContent, /old-profile.*Cancellation requested.*Reconciliation needed/);
+  h.node("attempt-list").children[0].fire("click"); await flush();
+  assert.equal(new URL(h.url()).searchParams.get("task"), "A");
+  assert.match(h.node("attempt-status").textContent, /not a provider heartbeat/);
+});
+
+test("delayed project settings and attempt reads cannot overwrite a newer A to B to A view", async () => {
+  const late = deferred(); let reads = 0;
+  const h = harness({handle: (url) => url.endsWith("/alpha/settings") && reads++ === 0
+    ? late.promise : projectHandle(url)});
+  await flush(); await h.clickProject("beta"); h.type("Beta draft"); await h.clickProject("alpha");
+  late.resolve(reply(settingsValue("alpha", 99, false, ["reviewer"]))); await flush();
+  assert.equal(h.node("team-enabled").checked, true);
+  assert.match(h.node("settings-status").textContent, /revision 1/);
+  await h.clickProject("beta"); assert.equal(h.node("prompt").value, "Beta draft");
+});
+
+test("team saves send only limited fields and a lost committed response reconciles once", async () => {
+  let stored = settingsValue("alpha"), writes = 0;
+  const h = harness({handle: (url, init) => {
+    if (url.endsWith("/alpha/settings")) return reply(stored);
+    if (url.endsWith("/alpha/team/members")) {
+      writes++; const payload = JSON.parse(init.body);
+      assert.deepEqual(Object.keys(payload).sort(), ["agent_ids", "enabled", "revision"]);
+      stored = settingsValue("alpha", 2, payload.enabled, payload.agent_ids);
+      return Promise.reject(new Error("Lost after commit"));
+    }
+    return projectHandle(url);
+  }});
+  await flush(); h.node("team-enabled").checked = false; h.node("team-enabled").fire("change");
+  await h.node("team-save").fire("click"); await flush();
+  assert.equal(writes, 1); assert.equal(h.node("team-enabled").checked, false);
+  assert.equal(h.node("team-save").disabled, true);
+  assert.match(h.node("settings-status").textContent, /revision 2/);
+  await h.advance(10000); assert.equal(writes, 1);
+});
+
+test("an unconfirmed team save keeps its draft locked across navigation and explicit reload", async () => {
+  let writes = 0;
+  const h = harness({handle: (url) => {
+    if (url.endsWith("/alpha/team/members")) { writes++; return Promise.reject(new Error("Unconfirmed")); }
+    return projectHandle(url);
+  }});
+  await flush(); h.node("team-enabled").checked = false; h.node("team-enabled").fire("change");
+  await h.node("team-save").fire("click"); await flush();
+  await h.clickProject("beta"); h.type("Keep beta"); await h.clickProject("alpha");
+  await h.node("team-reload").fire("click");
+  assert.equal(h.node("team-enabled").checked, false);
+  assert.equal(h.node("team-save").disabled, true);
+  assert.match(h.node("settings-status").textContent, /unknown/);
+  assert.equal(writes, 1);
+});
+
+test("a pending A save never overwrites B and retains the B draft", async () => {
+  const late = deferred();
+  const h = harness({handle: (url) => url.endsWith("/alpha/team/members") ? late.promise : projectHandle(url)});
+  await flush(); h.node("team-enabled").checked = false; h.node("team-enabled").fire("change");
+  const save = h.node("team-save").fire("click");
+  await h.clickProject("beta"); h.type("Keep this B draft");
+  late.resolve(reply(settingsValue("alpha", 2, false))); await save; await flush();
+  assert.equal(h.node("settings-project").textContent, "Project beta");
+  assert.equal(h.node("team-enabled").checked, true);
+  assert.equal(h.node("prompt").value, "Keep this B draft");
+});
+
+test("revision conflict retains draft until an explicit reload and never writes again", async () => {
+  let writes = 0;
+  const h = harness({handle: (url) => {
+    if (url.endsWith("/alpha/team/members")) { writes++; return reply({detail: "Team changed"}, 409); }
+    return projectHandle(url);
+  }});
+  await flush(); h.node("team-enabled").checked = false; h.node("team-enabled").fire("change");
+  await h.node("team-save").fire("click"); await flush();
+  assert.equal(h.node("team-enabled").checked, false);
+  assert.match(h.node("settings-status").textContent, /Unsaved edits retained/);
+  await h.node("team-reload").fire("click"); await flush();
+  assert.equal(h.node("team-enabled").checked, true);
+  assert.equal(writes, 1);
+});
+
+test("a removed draft profile does not silently become a record-only request", async () => {
+  let available = true;
+  const h = harness({handle: (url) => url.endsWith("/alpha/agents")
+    ? reply({project_id: "alpha", agents: available ? [{id: "coder", runtime: "codex", role: "implementer"}] : []})
+    : projectHandle(url)});
+  await flush(); h.type("Preserve my worker intent"); h.node("agent").value = "coder"; h.node("agent").fire("change");
+  available = false; await h.clickProject("beta"); await h.clickProject("alpha");
+  assert.equal(h.node("agent").value, "coder");
+  assert.equal(h.node("create-task").disabled, true);
+  assert.match(h.node("composer-help").textContent, /Explicitly choose/);
+  await h.node("composer").fire("submit");
+  assert.equal(h.calls.some((c) => c.url === "/api/jobs" && c.init.method === "POST"), false);
+});
+
+for (const [name, corrupt] of [
+  ["negative totals", (v) => { v.attempt_total = -1; }],
+  ["missing attention state", (v) => { v.attention.push({...v.attention[0], state: undefined}); v.attention_total++; }],
+  ["string cancellation", (v) => { v.attempts[0].cancel_requested = "false"; }],
+  ["invalid event time", (v) => { v.attempts[0].last_event_at = "unknown"; }],
+  ["inconsistent truncation", (v) => { v.attempt_total++; }],
+]) test(`malformed activity with ${name} preserves both last known lists`, async () => {
+  const attempt = {project_id: "alpha", job_id: "A", attempt_id: "known", title: "Known attempt",
+    profile_id: "coder", runtime: "codex", phase: "running", cancel_requested: false,
+    requires_reconciliation: false, outcome: null, last_event_at: "2026-10-28T00:00:00Z"};
+  let value = activityValue("alpha", [attempt], [{project_id: "alpha", job_id: "A", title: "Known attention", state: "blocked"}]);
+  const h = harness({handle: (url) => url.endsWith("/alpha/activity") ? reply(value) : projectHandle(url)});
+  await flush();
+  const prior = [h.node("attempt-list").children[0], h.node("attention-list").children[0]];
+  value = structuredClone(value); corrupt(value);
+  await h.advance(10000);
+  assert.equal(h.node("attempt-list").children[0], prior[0]);
+  assert.equal(h.node("attention-list").children[0], prior[1]);
+  assert.equal(h.node("attention-count").textContent, "Needs you unknown");
+  assert.match(h.node("attempt-status").textContent, /last known state/);
+});
+
+test("a late agent list cannot restore revoked availability after a team save", async () => {
+  const late = deferred(); let reads = 0, stored = settingsValue("alpha");
+  const h = harness({handle: (url, init) => {
+    if (url.endsWith("/alpha/agents")) return reads++ === 0 ? late.promise : reply({project_id: "alpha", agents: []});
+    if (url.endsWith("/alpha/settings")) return reply(stored);
+    if (url.endsWith("/alpha/team/members")) {
+      const body = JSON.parse(init.body); stored = settingsValue("alpha", 2, body.enabled); return reply(stored);
+    }
+    return projectHandle(url);
+  }});
+  await flush();
+  h.node("team-enabled").checked = false; h.node("team-enabled").fire("change");
+  await h.node("team-save").fire("click"); await flush();
+  late.resolve(reply({project_id: "alpha", agents: [{id: "revoked", runtime: "codex", role: "implementer"}]}));
+  await flush();
+  assert.equal(h.node("agent").children.some((n) => n.value === "revoked"), false);
+});
+
+test("unavailable stored members can be removed but never added back", async () => {
+  let stored = settingsValue("alpha", 2, true, ["coder", "retired"]), submitted;
+  stored.profiles.push({...stored.profiles[1], id: "retired", eligible: false,
+    executable: false, connection_id: "", model_id: "", model: null, runtime: "unavailable"});
+  const h = harness({handle: (url, init) => {
+    if (url.endsWith("/alpha/settings")) return reply(stored);
+    if (url.endsWith("/alpha/team/members")) {
+      submitted = JSON.parse(init.body); stored = settingsValue("alpha", 3, true, submitted.agent_ids); return reply(stored);
+    }
+    return projectHandle(url);
+  }});
+  await flush();
+  const input = h.node("team-members").children.map((n) => n.children[0]).find((n) => n.value === "retired");
+  assert.equal(input.checked, true); assert.equal(input.disabled, false);
+  input.checked = false; input.fire("change");
+  assert.equal(input.disabled, true);
+  await h.node("team-save").fire("click"); await flush();
+  assert.deepEqual(submitted.agent_ids, ["coder"]);
+});
+
+test("the bounded editor preserves Lead membership and explains an unavailable Lead", async () => {
+  let value = settingsValue("alpha", 1, true, ["coder", "reviewer"]);
+  value.team.lead_id = "reviewer";
+  const h = harness({handle: (url) => url.endsWith("/alpha/settings") ? reply(value) : projectHandle(url)});
+  await flush();
+  assert.equal(h.node("team-members").children[1].children[0].disabled, true);
+  assert.match(h.node("team-members").children[1].children[2].textContent, /Designated Lead/);
+  value = structuredClone(value); value.profiles[1].eligible = false;
+  await h.advance(10000);
+  assert.equal(h.node("team-enabled").disabled, true);
+  assert.equal(h.node("team-save").disabled, true);
+  assert.match(h.node("settings-status").textContent, /Lead unavailable.*runtime configuration/);
 });

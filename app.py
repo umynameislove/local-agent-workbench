@@ -102,6 +102,7 @@ from task_workflow import TaskWorkflow, WorkflowConflictError
 from team_config import AgentSystem, TeamConfigError
 from team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
 from verification import VerificationError, VerificationRunner
+from workspace_control import WorkspaceControl
 from workspace_ui import asset
 from worktree import (
     WorktreeConflictError,
@@ -278,6 +279,10 @@ def create_app(
     @api.get("/workspace.js", include_in_schema=False)
     async def workspace_script() -> Response:
         return asset("workspace.js")
+
+    @api.get("/project_control.js", include_in_schema=False)
+    async def project_control_script() -> Response:
+        return asset("project_control.js")
 
     @api.get("/api/health")
     async def health(request: Request) -> dict[str, object]:
@@ -467,6 +472,29 @@ def create_app(
     async def read_agents(request: Request, project_id: str) -> dict[str, object]:
         try:
             return request.app.state.task_workflow.agents(project_id)
+        except DatabaseError as error:
+            raise team_error(error) from error
+
+    @api.get("/api/projects/{project_id}/settings")
+    async def project_settings(request: Request, project_id: str) -> dict:
+        try:
+            return WorkspaceControl(request.app.state).settings(project_id)
+        except (DatabaseError, TeamConfigError) as error:
+            raise team_error(error) from error
+
+    @api.post("/api/projects/{project_id}/team/members")
+    async def project_members(
+        request: Request, project_id: str, payload: Annotated[object, Body()]
+    ):
+        try:
+            return WorkspaceControl(request.app.state).save_members(project_id, payload)
+        except (DatabaseError, TeamConfigError) as error:
+            raise team_error(error) from error
+
+    @api.get("/api/projects/{project_id}/activity")
+    async def project_activity(request: Request, project_id: str) -> dict:
+        try:
+            return WorkspaceControl(request.app.state).activity(project_id)
         except DatabaseError as error:
             raise team_error(error) from error
 
