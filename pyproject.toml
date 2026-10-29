@@ -18,22 +18,26 @@ dev = [
 ]
 
 [tool.uv]
-package = false
+package = true
 
 [build-system]
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
-[tool.setuptools]
-py-modules = ["app", "approval_service", "cancellation", "codex_accounts", "codex_adapter", "codex_events", "db", "diff_service", "diff_types", "engine", "event_stream", "job_submission", "logging_setup", "native_execution", "native_store", "planning", "promotion", "promotion_target", "remote_commands", "retention", "review_bundle", "secret_gate", "task_workflow", "team_config", "team_store", "telegram_gateway", "verification", "workspace_control", "worktree", "write_boundary"]
-packages = ["workspace_ui"]
+[project.scripts]
+agent-workbench = "local_agent_workbench.app:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["local_agent_workbench*"]
+namespaces = false
 
 [tool.setuptools.package-data]
-workspace_ui = ["*.html", "*.js"]
+"local_agent_workbench.workspace_ui" = ["*.html", "*.js"]
 
 [tool.pytest.ini_options]
 addopts = "-q"
-pythonpath = ["."]
+pythonpath = ["scripts"]
 testpaths = ["tests"]
 
 [tool.ruff]

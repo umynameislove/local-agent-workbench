@@ -10,8 +10,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from engine import JobState
+from local_agent_workbench.app import create_app
+from local_agent_workbench.engine import JobState
 
 
 def git(repository: Path, *arguments: str) -> str:

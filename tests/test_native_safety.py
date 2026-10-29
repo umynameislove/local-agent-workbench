@@ -8,8 +8,8 @@ import pytest
 from test_codex_adapter import adapter, authenticated_accounts, collect
 from test_codex_adapter import fake_codex as fake_codex
 
-from codex_adapter import CodexAdapter
-from engine import AdapterStart, ProcessResult
+from local_agent_workbench.codex_adapter import CodexAdapter
+from local_agent_workbench.engine import AdapterStart, ProcessResult
 
 
 @pytest.mark.anyio
@@ -36,7 +36,7 @@ async def test_authentication_requires_explicit_chatgpt_mode(
         assert kwargs["env"]["CODEX_HOME"] == str(accounts.slots[0].home)
         return ProcessResult(code, stdout, stderr)
 
-    monkeypatch.setattr("codex_adapter.run_process", probe)
+    monkeypatch.setattr("local_agent_workbench.codex_adapter.run_process", probe)
     assert await provider._authenticated(accounts.slots[0]) is accepted
 
 

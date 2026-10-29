@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     ApprovalAlreadyExistsError,
@@ -26,7 +26,7 @@ from db import (
     JobRepository,
     ProjectRepository,
 )
-from engine import (
+from local_agent_workbench.engine import (
     ApprovalCreate,
     ApprovalDecision,
     ApprovalResolution,

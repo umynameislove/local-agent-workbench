@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from engine import JobRuntime, RuntimeEvent, RuntimeEventKind
+from local_agent_workbench.engine import JobRuntime, RuntimeEvent, RuntimeEventKind
 
 PAYLOADS = {
     "text": {"text": ""},

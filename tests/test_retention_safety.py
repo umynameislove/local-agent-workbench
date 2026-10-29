@@ -18,10 +18,10 @@ from test_retention import (
 )
 from test_worktree import git
 
-from db import ApprovalValidationError, ApprovalWorkflowConflictError
-from engine import EventCreate, JobState, ProcessResult, ProcessTimeoutError
-from promotion_target import target_lock
-from retention import RetentionConflictError
+from local_agent_workbench.db import ApprovalValidationError, ApprovalWorkflowConflictError
+from local_agent_workbench.engine import EventCreate, JobState, ProcessResult, ProcessTimeoutError
+from local_agent_workbench.promotion_target import target_lock
+from local_agent_workbench.retention import RetentionConflictError
 
 
 @pytest.mark.anyio
@@ -156,7 +156,7 @@ async def test_database_audit_failure_never_hides_a_destructive_attempt(
 async def test_git_failure_stays_auditable_and_cannot_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    import worktree
+    from local_agent_workbench import worktree
 
     async with scenario(tmp_path) as context:
         due(context)
@@ -190,8 +190,8 @@ async def test_git_failure_stays_auditable_and_cannot_retry(
 async def test_interruption_after_intent_survives_restart_without_deletion_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import worktree
-    from app import create_app
+    from local_agent_workbench import worktree
+    from local_agent_workbench.app import create_app
 
     async with scenario(tmp_path) as context:
         due(context)

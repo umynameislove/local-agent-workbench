@@ -9,7 +9,7 @@ from test_codex_adapter import fake_codex as fake_codex
 from test_native_execution import native_app, prepare, settled
 from test_team_config import team_configuration
 
-from engine import ConfigurationError, EventCreate, WorkbenchConfig
+from local_agent_workbench.engine import ConfigurationError, EventCreate, WorkbenchConfig
 
 
 def configure_check(config):

@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from engine import (
+from local_agent_workbench.engine import (
     AdapterError,
     AdapterSession,
     AdapterStart,

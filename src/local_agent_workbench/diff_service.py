@@ -4,7 +4,7 @@ import os
 import stat
 from pathlib import Path
 
-from diff_types import (
+from .diff_types import (
     DiffChange,
     DiffConflictError,
     DiffContentKind,
@@ -20,9 +20,9 @@ from diff_types import (
     is_utf8_text,
     valid_object_id,
 )
-from diff_types import DiffServiceError as DiffServiceError
-from engine import ProcessRunnerError, ProcessTimeoutError, run_process
-from write_boundary import WriteBoundary, WriteBoundaryError
+from .diff_types import DiffServiceError as DiffServiceError
+from .engine import ProcessRunnerError, ProcessTimeoutError, run_process
+from .write_boundary import WriteBoundary, WriteBoundaryError
 
 _ZERO_OBJECT_IDS = frozenset({"0" * 40, "0" * 64})
 _REGULAR_MODES = frozenset({"100644", "100755"})

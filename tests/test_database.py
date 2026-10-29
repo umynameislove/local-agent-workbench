@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     Database,
@@ -20,7 +20,7 @@ from db import (
     ProjectRepositoryError,
     ProjectValidationError,
 )
-from engine import PermissionMode, ProjectConfig, Sensitivity
+from local_agent_workbench.engine import PermissionMode, ProjectConfig, Sensitivity
 
 
 def migration(version: int, name: str, *statements: str) -> Migration:

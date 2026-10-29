@@ -11,7 +11,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from repo_boundary import (
     EXIT_OK,
     EXIT_SCAN_ERROR,
@@ -198,7 +197,9 @@ def test_scan_result_is_deterministic(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("relative_path", ["repo_boundary.py", "tests/test_repo_boundary.py"])
+@pytest.mark.parametrize(
+    "relative_path", ["scripts/repo_boundary.py", "tests/test_repo_boundary.py"]
+)
 def test_checker_files_receive_content_scanning(tmp_path: Path, relative_path: str) -> None:
     build_clean_repository(tmp_path)
     candidate = tmp_path / relative_path

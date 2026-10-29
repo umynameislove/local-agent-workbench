@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from app import create_app
-from db import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import (
     ApprovalRecord,
     ApprovalRepository,
     Database,
@@ -19,7 +19,7 @@ from db import (
     RecoveryService,
     RecoveryServiceError,
 )
-from engine import (
+from local_agent_workbench.engine import (
     TERMINAL_JOB_STATES,
     ApprovalCreate,
     JobCreate,
@@ -199,7 +199,7 @@ def test_new_python_process_recovers_waiting_approval(tmp_path: Path) -> None:
 import json
 import sys
 from pathlib import Path
-from db import Database, RecoveryService
+from local_agent_workbench.db import Database, RecoveryService
 
 item = RecoveryService(Database(Path(sys.argv[1])), Path(sys.argv[2])).load()[0]
 print(json.dumps({

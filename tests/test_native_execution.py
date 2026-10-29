@@ -11,13 +11,13 @@ from test_codex_adapter import fake_codex as fake_codex
 from test_job_submission import initialize_repository
 from test_team_config import team_configuration
 
-from app import create_app
-from codex_accounts import CodexAccountPool, codex_account_slots
-from codex_adapter import CodexAdapter
-from engine import JobState
-from native_execution import NativeExecutionService
-from native_store import NativeConflictError
-from worktree import worktree_identity
+from local_agent_workbench.app import create_app
+from local_agent_workbench.codex_accounts import CodexAccountPool, codex_account_slots
+from local_agent_workbench.codex_adapter import CodexAdapter
+from local_agent_workbench.engine import JobState
+from local_agent_workbench.native_execution import NativeExecutionService
+from local_agent_workbench.native_store import NativeConflictError
+from local_agent_workbench.worktree import worktree_identity
 
 
 @asynccontextmanager

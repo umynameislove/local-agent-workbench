@@ -12,7 +12,13 @@ import pytest
 from anyio import from_thread, to_thread
 from test_workspace import stored_job, workspace
 
-from telegram_gateway import GatewayError, TelegramGateway, _NoRedirect, _read_json, main
+from local_agent_workbench.telegram_gateway import (
+    GatewayError,
+    TelegramGateway,
+    _NoRedirect,
+    _read_json,
+    main,
+)
 
 TOKEN = "".join(("123456789", ":", "x" * 30))
 OWNER = 123456
@@ -155,7 +161,9 @@ def test_token_and_network_failures_are_sanitized(monkeypatch):
         def open(self, *args, **kwargs):
             raise URLError("https://api.telegram.org/bot" + TOKEN)
 
-    monkeypatch.setattr("telegram_gateway.build_opener", lambda *args: Opener())
+    monkeypatch.setattr(
+        "local_agent_workbench.telegram_gateway.build_opener", lambda *args: Opener()
+    )
     with pytest.raises(GatewayError) as error:
         _read_json(Request("https://api.telegram.org/bot" + TOKEN), 1)
     assert TOKEN not in str(error.value)
@@ -179,7 +187,7 @@ def test_transport_bounds_untrusted_responses_and_disables_proxies(monkeypatch, 
         handlers.extend(items)
         return Opener()
 
-    monkeypatch.setattr("telegram_gateway.build_opener", build)
+    monkeypatch.setattr("local_agent_workbench.telegram_gateway.build_opener", build)
     with pytest.raises(GatewayError):
         _read_json(Request("http://127.0.0.1:8765/api/control"), 5)
     assert handlers[0].proxies == {}

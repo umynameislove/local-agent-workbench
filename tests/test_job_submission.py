@@ -10,9 +10,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from db import JobRepository
-from engine import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import JobRepository
+from local_agent_workbench.engine import (
     JobRuntime,
     PermissionMode,
     ProcessResult,
@@ -204,7 +204,7 @@ async def test_invalid_payloads_fail_before_git_or_database_work(
     ]
 
     async with api.router.lifespan_context(api):
-        monkeypatch.setattr("job_submission.run_process", unexpected_git)
+        monkeypatch.setattr("local_agent_workbench.job_submission.run_process", unexpected_git)
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             responses = [
@@ -228,7 +228,7 @@ async def test_missing_project_fails_without_git_or_job(
         raise AssertionError("Git must not run for a missing project.")
 
     async with api.router.lifespan_context(api):
-        monkeypatch.setattr("job_submission.run_process", unexpected_git)
+        monkeypatch.setattr("local_agent_workbench.job_submission.run_process", unexpected_git)
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
             response = await client.post(
@@ -311,12 +311,12 @@ async def test_git_failure_and_invalid_output_are_sanitized(
     async with api.router.lifespan_context(api):
         transport = httpx.ASGITransport(app=api)
         async with httpx.AsyncClient(transport=transport, base_url="http://localhost") as client:
-            monkeypatch.setattr("job_submission.run_process", unavailable)
+            monkeypatch.setattr("local_agent_workbench.job_submission.run_process", unavailable)
             unavailable_response = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": "Inspect this project."},
             )
-            monkeypatch.setattr("job_submission.run_process", invalid)
+            monkeypatch.setattr("local_agent_workbench.job_submission.run_process", invalid)
             invalid_response = await client.post(
                 "/api/jobs",
                 json={"project_id": "sample-project", "request": "Inspect this project."},

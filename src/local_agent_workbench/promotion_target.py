@@ -8,10 +8,10 @@ import stat
 from contextlib import contextmanager
 from pathlib import Path
 
-from diff_service import DiffServiceError, ReadOnlyDiffService
-from diff_types import DiffContentKind, UnifiedDiff
-from engine import ProcessRunnerError, run_process
-from write_boundary import WriteBoundary, WriteBoundaryError
+from .diff_service import DiffServiceError, ReadOnlyDiffService
+from .diff_types import DiffContentKind, UnifiedDiff
+from .engine import ProcessRunnerError, run_process
+from .write_boundary import WriteBoundary, WriteBoundaryError
 
 
 class TargetConflictError(RuntimeError):

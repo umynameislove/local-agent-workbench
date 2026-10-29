@@ -8,7 +8,7 @@ from typing import Any
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     ApprovalRepository,
@@ -23,7 +23,7 @@ from db import (
     PlannerValidationError,
     ProjectRepository,
 )
-from engine import (
+from local_agent_workbench.engine import (
     ApprovalCreate,
     JobCreate,
     JobRuntime,

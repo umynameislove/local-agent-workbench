@@ -6,8 +6,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from engine import JobRuntime, RuntimeEvent, RuntimeEventKind
-from write_boundary import WriteBoundary, WriteBoundaryError
+from .engine import JobRuntime, RuntimeEvent, RuntimeEventKind
+from .write_boundary import WriteBoundary, WriteBoundaryError
 
 
 class CodexNativeProtocolError(RuntimeError):

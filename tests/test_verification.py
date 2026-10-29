@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     Database,
@@ -19,7 +19,7 @@ from db import (
     VerificationRepositoryError,
     VerificationValidationError,
 )
-from engine import (
+from local_agent_workbench.engine import (
     JobCreate,
     JobRuntime,
     JobState,
@@ -29,12 +29,12 @@ from engine import (
     VerificationCreate,
     VerificationOutcome,
 )
-from verification import (
+from local_agent_workbench.verification import (
     VerificationCommand,
     VerificationConflictError,
     VerificationRunner,
 )
-from verification import (
+from local_agent_workbench.verification import (
     VerificationNotFoundError as RunnerNotFoundError,
 )
 

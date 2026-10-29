@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from write_boundary import WriteBoundary, WriteBoundaryError
+from local_agent_workbench.write_boundary import WriteBoundary, WriteBoundaryError
 
 
 def worktree(tmp_path: Path) -> Path:

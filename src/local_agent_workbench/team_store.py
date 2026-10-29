@@ -5,8 +5,8 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from db import DatabaseError, JobRecord, ProjectRepository, _Repository
-from team_config import AgentSystem, ProjectTeam, TeamConfigError
+from .db import DatabaseError, JobRecord, ProjectRepository, _Repository
+from .team_config import AgentSystem, ProjectTeam, TeamConfigError
 
 
 class TeamStoreError(DatabaseError):

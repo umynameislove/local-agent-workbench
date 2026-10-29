@@ -46,6 +46,17 @@ working-local/  real config, database, logs, cache and worktrees; never push
 
 The application will use `AGENT_WORKBENCH_HOME` to locate its runtime home. Personal configuration and operational state are never part of this repository.
 
+## Repository layout
+
+```text
+src/local_agent_workbench/  application modules and packaged workspace assets
+tests/                     Python and browser controller tests
+scripts/                   repository maintenance tools
+.github/workflows/         continuous integration
+```
+
+Install the project with `uv sync --frozen` before running commands. The editable development install and published wheel use the same `local_agent_workbench` package. `uv run agent-workbench` and `uv run python -m local_agent_workbench` start the local server. The former root module commands are replaced by these package entry points. Runtime configuration and SQLite data retain their existing locations.
+
 ## Project configuration
 
 Copy the public example into the runtime home, then set each project root to an existing Git worktree:
@@ -62,7 +73,7 @@ Submit a task with `POST /api/jobs`. The client provides `project_id`, `request`
 
 ### Project teams and native execution
 
-Version one configuration remains supported without enabling native execution. `team_config.migrate_config` returns a version two copy with an empty agent system, native execution disabled and legacy advice disabled. It does not write a file, discover accounts or modify credentials. The public example intentionally stays disabled and compatible with version one.
+Version one configuration remains supported without enabling native execution. `local_agent_workbench.team_config.migrate_config` returns a version two copy with an empty agent system, native execution disabled and legacy advice disabled. It does not write a file, discover accounts or modify credentials. The public example intentionally stays disabled and compatible with version one.
 
 In version two, `agent_system` contains `connections`, `models`, `agents`, `teams` and explicit `native_execution_enabled`. The default global limit is four active agents with one heavy local lane. The first supervisor is deliberately stricter: one native writer across the database. Higher fleet capacity is not yet implemented. Local configuration must identify a native account slot and its verified capabilities; no browser response contains a credential reference or account directory. A source connection alone never permits project access. Native subscription workers are cloud runtimes and cannot execute for cloud prohibited projects.
 
@@ -130,12 +141,13 @@ Requires Python 3.12 and `uv`:
 
 ```bash
 uv sync --frozen
-AGENT_WORKBENCH_HOME=../working-local uv run uvicorn app:app --host 127.0.0.1 --port 8765
+AGENT_WORKBENCH_HOME=../working-local uv run uvicorn local_agent_workbench.app:app --host 127.0.0.1 --port 8765
 ```
 
 Run the complete current quality gate with Node.js 20 or newer available for the dependency free browser controller tests:
 
 ```bash
+uv run python scripts/repo_boundary.py .
 uv run ruff check .
 uv run ruff format --check .
 uv run pytest
@@ -149,7 +161,7 @@ The separate status reader uses outbound long polling. It does not expose the da
 After starting the local backend, run this command with your real user ID and explicitly selected project IDs:
 
 ```bash
-AGENT_WORKBENCH_HOME=../working-local uv run python -m telegram_gateway --owner-id 123456789 --project sample-api --allow-metadata-egress
+AGENT_WORKBENCH_HOME=../working-local uv run python -m local_agent_workbench.telegram_gateway --owner-id 123456789 --project sample-api --allow-metadata-egress
 ```
 
 The placeholder ID is not a working configuration. Enter the bot token at the hidden terminal prompt. It remains in process memory and is not saved or passed through command arguments. The reader accepts `/start`, `/help` and `/status` only from that user in their matching private chat. It ignores other users, groups, forwarded messages, edited messages and commands older than two minutes. Stop it with Ctrl+C.
@@ -231,7 +243,7 @@ This runner targets macOS and Linux commands with bounded output; captured outpu
 Create a consistent snapshot of the existing runtime database while the application is running:
 
 ```bash
-AGENT_WORKBENCH_HOME=../working-local uv run python app.py backup ../working-local/state-backup.db
+AGENT_WORKBENCH_HOME=../working-local uv run agent-workbench backup ../working-local/state-backup.db
 ```
 
 The destination parent must already exist. Each backup requires a new filename outside source repositories. Existing files are never replaced. The command checks database integrity before publishing the snapshot and exits unsuccessfully if verification fails. It does not initialize or migrate the source database.

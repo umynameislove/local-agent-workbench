@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     Database,
@@ -21,7 +21,7 @@ from db import (
     UsageRepositoryError,
     UsageValidationError,
 )
-from engine import (
+from local_agent_workbench.engine import (
     JobCreate,
     JobRuntime,
     JobState,

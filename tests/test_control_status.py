@@ -7,8 +7,8 @@ import httpx
 import pytest
 from test_workspace import stored_job, workspace
 
-from db import JobRepository, JobRepositoryError, ProjectRepository
-from engine import JobCreate, JobRuntime, JobState, ProjectConfig
+from local_agent_workbench.db import JobRepository, JobRepositoryError, ProjectRepository
+from local_agent_workbench.engine import JobCreate, JobRuntime, JobState, ProjectConfig
 
 
 @pytest.mark.anyio

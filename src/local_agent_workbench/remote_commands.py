@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 from contextlib import contextmanager
 
-from db import DatabaseError, _Repository
-from team_store import encode
+from .db import DatabaseError, _Repository
+from .team_store import encode
 
 
 class RemoteJournalError(DatabaseError):

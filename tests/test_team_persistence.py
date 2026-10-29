@@ -10,11 +10,16 @@ import pytest
 from test_job_submission import initialize_repository
 from test_team_config import team_configuration
 
-from app import create_app
-from db import LATEST_SCHEMA_VERSION, MIGRATIONS, Database, ProjectRepository
-from engine import WorkbenchConfig
-from team_config import TeamConfigError
-from team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import LATEST_SCHEMA_VERSION, MIGRATIONS, Database, ProjectRepository
+from local_agent_workbench.engine import WorkbenchConfig
+from local_agent_workbench.team_config import TeamConfigError
+from local_agent_workbench.team_store import (
+    TeamConflictError,
+    TeamNotFoundError,
+    TeamRepository,
+    TeamStoreError,
+)
 
 
 def team_repository(tmp_path):

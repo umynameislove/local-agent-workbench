@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from app import create_app
-from db import LATEST_SCHEMA_VERSION
-from logging_setup import LOGGER_NAME, REDACTED, configure_logging, redact
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import LATEST_SCHEMA_VERSION
+from local_agent_workbench.logging_setup import LOGGER_NAME, REDACTED, configure_logging, redact
 
 SYNTHETIC_SECRET = "synthetic" + "_secret_value_123456"
 

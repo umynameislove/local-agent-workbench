@@ -8,10 +8,15 @@ import httpx
 import pytest
 from test_approval_service import decide, prepare, request, review
 
-from app import create_app
-from approval_service import ApprovalService
-from db import ApprovalWorkflowRepository
-from engine import ConfigurationError, JobState, RetentionConfig, WorkbenchConfig
+from local_agent_workbench.app import create_app
+from local_agent_workbench.approval_service import ApprovalService
+from local_agent_workbench.db import ApprovalWorkflowRepository
+from local_agent_workbench.engine import (
+    ConfigurationError,
+    JobState,
+    RetentionConfig,
+    WorkbenchConfig,
+)
 
 
 @pytest.mark.parametrize("value", [0, -1, 366, True, False, 1.5, "7", None])

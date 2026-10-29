@@ -7,14 +7,20 @@ from pathlib import Path
 
 import pytest
 
-from cancellation import (
+from local_agent_workbench.cancellation import (
     CancellationConflictError,
     CancellationPersistenceError,
     CancellationProviderError,
     CancellationService,
 )
-from db import AtomicTransitionService, Database, EventRepository, JobRepository, ProjectRepository
-from engine import (
+from local_agent_workbench.db import (
+    AtomicTransitionService,
+    Database,
+    EventRepository,
+    JobRepository,
+    ProjectRepository,
+)
+from local_agent_workbench.engine import (
     AdapterError,
     AdapterSession,
     AdapterStart,

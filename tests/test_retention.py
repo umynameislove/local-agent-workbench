@@ -12,8 +12,8 @@ import httpx
 import pytest
 from test_worktree import git, initialize_repository, write_config
 
-from app import create_app
-from engine import JobState, JobUpdate
+from local_agent_workbench.app import create_app
+from local_agent_workbench.engine import JobState, JobUpdate
 
 NOW = datetime(2030, 1, 1, 12, 30, 0, 123456, tzinfo=UTC)
 JOB_ID = "retained-job"

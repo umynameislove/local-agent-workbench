@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from db import Database, ProjectAlreadyExistsError, ProjectRepository
-from engine import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import Database, ProjectAlreadyExistsError, ProjectRepository
+from local_agent_workbench.engine import (
     ConfigurationError,
     ProcessRunnerError,
     WorkbenchConfig,
@@ -202,7 +202,7 @@ async def test_git_start_failure_is_actionable_and_does_not_expose_root(
     async def fail_git(*args: object, **kwargs: object) -> None:
         raise ProcessRunnerError("synthetic failure")
 
-    monkeypatch.setattr("engine.run_process", fail_git)
+    monkeypatch.setattr("local_agent_workbench.engine.run_process", fail_git)
 
     with pytest.raises(ConfigurationError, match="Git could not be started") as failure:
         await load_configured_projects(config_path)

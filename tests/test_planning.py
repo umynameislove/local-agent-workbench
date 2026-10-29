@@ -8,9 +8,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from db import JobRecord
-from engine import EventCreate, JobState, JobUpdate
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import JobRecord
+from local_agent_workbench.engine import EventCreate, JobState, JobUpdate
 
 
 def git(repository: Path, *arguments: str) -> str:

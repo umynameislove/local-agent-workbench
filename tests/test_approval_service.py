@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import create_app
-from approval_service import ApprovalService
-from db import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.approval_service import ApprovalService
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     ApprovalRepository,
@@ -28,7 +28,7 @@ from db import (
     ReviewBundleRepository,
     VerificationRepository,
 )
-from engine import (
+from local_agent_workbench.engine import (
     ApprovalCreate,
     ApprovalDecision,
     JobCreate,
@@ -40,8 +40,8 @@ from engine import (
     RecoveryAction,
     Sensitivity,
 )
-from review_bundle import ReviewBundleService
-from secret_gate import PreReviewSecretGate
+from local_agent_workbench.review_bundle import ReviewBundleService
+from local_agent_workbench.secret_gate import PreReviewSecretGate
 
 
 def git(repository: Path, *arguments: str) -> str:

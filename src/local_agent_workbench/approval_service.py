@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from db import (
+from .db import (
     ApprovalDecisionConflictError,
     ApprovalExpiredError,
     ApprovalNotFoundError,
@@ -28,11 +28,11 @@ from db import (
     ReviewBundleRecord,
     ReviewBundleRepository,
 )
-from diff_service import DiffServiceError, ReadOnlyDiffService
-from diff_types import valid_object_id
-from engine import ApprovalCreate, ApprovalDecision, ApprovalResolution, JobState
-from secret_gate import SecretScanner
-from worktree import WorktreeError, worktree_identity
+from .diff_service import DiffServiceError, ReadOnlyDiffService
+from .diff_types import valid_object_id
+from .engine import ApprovalCreate, ApprovalDecision, ApprovalResolution, JobState
+from .secret_gate import SecretScanner
+from .worktree import WorktreeError, worktree_identity
 
 
 class ApprovalServiceError(RuntimeError):

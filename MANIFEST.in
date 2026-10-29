@@ -1,0 +1,3 @@
+include config.example.json
+recursive-include scripts *.py
+recursive-include tests *.py *.cjs

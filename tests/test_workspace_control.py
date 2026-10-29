@@ -10,10 +10,10 @@ import pytest
 from test_team_config import team_configuration
 from test_workspace import repository
 
-from app import create_app
-from engine import EventCreate, JobCreate, JobRuntime, JobState, JobUpdate
-from native_store import NativeConflictError
-from team_store import TeamRepository
+from local_agent_workbench.app import create_app
+from local_agent_workbench.engine import EventCreate, JobCreate, JobRuntime, JobState, JobUpdate
+from local_agent_workbench.native_store import NativeConflictError
+from local_agent_workbench.team_store import TeamRepository
 
 
 @asynccontextmanager
