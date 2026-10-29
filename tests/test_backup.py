@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     ApprovalRepository,
     BackupService,
     BackupServiceError,
@@ -17,7 +17,13 @@ from db import (
     JobRepository,
     ProjectRepository,
 )
-from engine import ApprovalCreate, JobCreate, PermissionMode, ProjectConfig, Sensitivity
+from local_agent_workbench.engine import (
+    ApprovalCreate,
+    JobCreate,
+    PermissionMode,
+    ProjectConfig,
+    Sensitivity,
+)
 
 
 def populated(tmp_path: Path) -> Database:

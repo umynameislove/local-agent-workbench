@@ -17,7 +17,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from team_config import AgentSystem, TeamConfigError
+from .team_config import AgentSystem, TeamConfigError
 
 APP_VERSION = "0.1.0"
 RUNTIME_ENV = "AGENT_WORKBENCH_HOME"

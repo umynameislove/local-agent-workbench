@@ -7,7 +7,7 @@ from typing import get_type_hints
 
 import pytest
 
-from engine import (
+from local_agent_workbench.engine import (
     AdapterError,
     AdapterSession,
     AdapterStart,

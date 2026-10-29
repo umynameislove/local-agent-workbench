@@ -8,10 +8,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from textwrap import shorten
 
-from db import ProjectRepository
-from native_execution import NativeExecutionService
-from team_config import TeamConfigError
-from team_store import TeamConflictError, TeamNotFoundError, TeamStoreError
+from .db import ProjectRepository
+from .native_execution import NativeExecutionService
+from .team_config import TeamConfigError
+from .team_store import TeamConflictError, TeamNotFoundError, TeamStoreError
 
 
 class WorkspaceControl:

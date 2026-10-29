@@ -6,8 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from codex_accounts import CodexAccountPool, CodexAccountSlot, codex_account_slots
-from engine import AdapterError
+from local_agent_workbench.codex_accounts import (
+    CodexAccountPool,
+    CodexAccountSlot,
+    codex_account_slots,
+)
+from local_agent_workbench.engine import AdapterError
 
 
 def test_runtime_slots_use_private_provider_layout(tmp_path: Path) -> None:

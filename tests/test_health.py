@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from engine import ProviderHealth, ProviderHealthState
+from local_agent_workbench.engine import ProviderHealth, ProviderHealthState
 
 OBSERVED_AT = datetime(2026, 9, 13, 8, tzinfo=UTC)
 

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     ApprovalAlreadyExistsError,
     ApprovalRepository,
     AtomicTransitionService,
@@ -21,7 +21,7 @@ from db import (
     ProjectRepository,
     RecoveryService,
 )
-from engine import (
+from local_agent_workbench.engine import (
     ApprovalCreate,
     ApprovalDecision,
     ApprovalResolution,
@@ -42,8 +42,10 @@ import sqlite3
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from db import Database, JobRepository, AtomicTransitionService, ApprovalRepository
-from engine import (
+from local_agent_workbench.db import (
+    Database, JobRepository, AtomicTransitionService, ApprovalRepository,
+)
+from local_agent_workbench.engine import (
     JobCreate, JobUpdate, JobState, JobRuntime, EventCreate,
     ApprovalCreate, ApprovalResolution, ApprovalDecision,
 )
@@ -196,7 +198,7 @@ def test_interrupted_recovery_and_backup_preserve_pending_approval(
     program = """
 import os, sys
 from pathlib import Path
-from db import Database, RecoveryService
+from local_agent_workbench.db import Database, RecoveryService
 service = RecoveryService(Database(Path(sys.argv[1])), Path(sys.argv[2]))
 original = service._classify
 def interrupt(*args, **kwargs):

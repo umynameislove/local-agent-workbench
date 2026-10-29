@@ -11,9 +11,9 @@ from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
-from db import Database, DatabaseError
-from engine import ConfigurationError, resolve_runtime_home
-from remote_commands import RemoteJournal, RemoteJournalError
+from .db import Database, DatabaseError
+from .engine import ConfigurationError, resolve_runtime_home
+from .remote_commands import RemoteJournal, RemoteJournalError
 
 
 class GatewayError(RuntimeError):

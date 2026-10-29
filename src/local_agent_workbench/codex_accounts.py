@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from engine import AdapterError
+from .engine import AdapterError
 
 _SLOT_NAME = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}\Z")
 

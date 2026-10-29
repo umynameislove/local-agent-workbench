@@ -3,13 +3,13 @@ from __future__ import annotations
 import hashlib
 from collections.abc import Mapping
 
-from db import EventRepository, JobRepository
-from diff_service import ReadOnlyDiffService
-from engine import EventCreate, JobState, VerificationOutcome
-from native_execution import NativeExecutionService
-from team_config import TeamConfigError
-from team_store import TeamStoreError, encode
-from verification import VerificationCommand
+from .db import EventRepository, JobRepository
+from .diff_service import ReadOnlyDiffService
+from .engine import EventCreate, JobState, VerificationOutcome
+from .native_execution import NativeExecutionService
+from .team_config import TeamConfigError
+from .team_store import TeamStoreError, encode
+from .verification import VerificationCommand
 
 
 class WorkflowConflictError(RuntimeError):

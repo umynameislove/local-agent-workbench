@@ -3,7 +3,12 @@ from datetime import UTC
 
 import pytest
 
-from engine import AdapterSession, JobRuntime, RuntimeEventKind, RuntimeEventStreamNormalizer
+from local_agent_workbench.engine import (
+    AdapterSession,
+    JobRuntime,
+    RuntimeEventKind,
+    RuntimeEventStreamNormalizer,
+)
 
 PAYLOADS = {
     "text": {"text": ""},

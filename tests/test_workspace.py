@@ -12,10 +12,10 @@ import httpx
 import pytest
 from test_retention import CLEANUP_URL, JOB_ID, due, scenario
 
-from app import create_app
-from db import JobRepository, JobValidationError, ProjectRepository
-from engine import EventCreate, JobCreate, JobRuntime, ProjectConfig
-from workspace_ui import asset
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import JobRepository, JobValidationError, ProjectRepository
+from local_agent_workbench.engine import EventCreate, JobCreate, JobRuntime, ProjectConfig
+from local_agent_workbench.workspace_ui import asset
 
 
 def repository(path: Path) -> Path:
@@ -312,7 +312,7 @@ async def test_task_view_storage_failure_is_sanitized(
     async with workspace(tmp_path) as (_, client):
 
         def fail(*args, **kwargs):
-            from db import JobRepositoryError
+            from local_agent_workbench.db import JobRepositoryError
 
             raise JobRepositoryError("internal context must not escape")
 

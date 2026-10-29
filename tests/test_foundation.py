@@ -10,8 +10,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app, main
-from db import (
+from local_agent_workbench.app import create_app, main
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     ApprovalRepository,
     AtomicTransitionService,
@@ -25,17 +25,17 @@ from db import (
     UsageRepository,
     VerificationRepository,
 )
-from engine import (
+from local_agent_workbench.engine import (
     CONSULTANT_MODEL,
     ConfigurationError,
     WorkbenchConfig,
     resolve_runtime_home,
     validate_consultant_advice,
 )
-from event_stream import EventStreamService
-from secret_gate import PreReviewSecretGate
-from verification import VerificationRunner
-from worktree import WorktreeManager
+from local_agent_workbench.event_stream import EventStreamService
+from local_agent_workbench.secret_gate import PreReviewSecretGate
+from local_agent_workbench.verification import VerificationRunner
+from local_agent_workbench.worktree import WorktreeManager
 
 
 def test_runtime_home_resolves_relative_path_and_bootstraps_outside_source(tmp_path: Path) -> None:
@@ -171,7 +171,7 @@ def test_backup_command_creates_a_verified_snapshot(tmp_path: Path) -> None:
     Database(runtime / "state.db").initialize()
     destination = tmp_path / "snapshot.db"
     result = subprocess.run(
-        [sys.executable, "app.py", "backup", str(destination)],
+        [sys.executable, "-m", "local_agent_workbench", "backup", str(destination)],
         env={**os.environ, "AGENT_WORKBENCH_HOME": str(runtime)},
         capture_output=True,
         text=True,
@@ -192,7 +192,7 @@ def test_backup_command_does_not_bootstrap_missing_source(tmp_path: Path) -> Non
     runtime = tmp_path / "missing-runtime"
     destination = tmp_path / "snapshot.db"
     result = subprocess.run(
-        [sys.executable, "app.py", "backup", str(destination)],
+        [sys.executable, "-m", "local_agent_workbench", "backup", str(destination)],
         env={**os.environ, "AGENT_WORKBENCH_HOME": str(runtime)},
         capture_output=True,
         text=True,
@@ -215,4 +215,6 @@ def test_default_command_still_starts_local_server(monkeypatch: pytest.MonkeyPat
 
     main([])
 
-    start_server.assert_called_once_with("app:app", host="127.0.0.1", port=8765, reload=False)
+    start_server.assert_called_once_with(
+        "local_agent_workbench.app:app", host="127.0.0.1", port=8765, reload=False
+    )

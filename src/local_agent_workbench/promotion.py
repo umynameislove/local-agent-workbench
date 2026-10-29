@@ -4,8 +4,8 @@ import asyncio
 from collections.abc import Mapping
 from pathlib import Path
 
-from approval_service import ApprovalService, ApprovalStateError, ApprovalUnavailableError
-from db import (
+from .approval_service import ApprovalService, ApprovalStateError, ApprovalUnavailableError
+from .db import (
     ApprovalNotFoundError,
     ApprovalRecord,
     ApprovalRepository,
@@ -28,9 +28,9 @@ from db import (
     ReviewBundleRepository,
     ReviewBundleRepositoryError,
 )
-from diff_service import DiffServiceError, ReadOnlyDiffService
-from diff_types import valid_object_id
-from engine import (
+from .diff_service import DiffServiceError, ReadOnlyDiffService
+from .diff_types import valid_object_id
+from .engine import (
     ApprovalDecision,
     EventCreate,
     JobState,
@@ -38,7 +38,7 @@ from engine import (
     PermissionMode,
     ProcessRunnerError,
 )
-from promotion_target import (
+from .promotion_target import (
     TargetConflictError,
     TargetUnavailableError,
     apply_patch,
@@ -47,8 +47,8 @@ from promotion_target import (
     require_clean_target,
     target_lock,
 )
-from worktree import WorktreeConflictError, WorktreeManager, WorktreeUnavailableError
-from write_boundary import WriteBoundary, WriteBoundaryError
+from .worktree import WorktreeConflictError, WorktreeManager, WorktreeUnavailableError
+from .write_boundary import WriteBoundary, WriteBoundaryError
 
 
 class PromotionError(RuntimeError):

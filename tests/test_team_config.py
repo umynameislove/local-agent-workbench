@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from engine import ConfigurationError, WorkbenchConfig
-from team_config import AgentSystem, TeamConfigError, migrate_config
+from local_agent_workbench.engine import ConfigurationError, WorkbenchConfig
+from local_agent_workbench.team_config import AgentSystem, TeamConfigError, migrate_config
 
 
 def team_configuration() -> dict:

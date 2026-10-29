@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from db import (
+from local_agent_workbench.db import (
     AtomicTransitionConflictError,
     AtomicTransitionError,
     AtomicTransitionRecord,
@@ -19,7 +19,7 @@ from db import (
     JobRepository,
     ProjectRepository,
 )
-from engine import (
+from local_agent_workbench.engine import (
     EventCreate,
     JobCreate,
     JobRuntime,

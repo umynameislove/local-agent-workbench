@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from approval_service import ApprovalService, ApprovalStateError, ApprovalUnavailableError
-from db import (
+from .approval_service import ApprovalService, ApprovalStateError, ApprovalUnavailableError
+from .db import (
     ApprovalRecord,
     ApprovalRepository,
     ApprovalWorkflowRepository,
@@ -21,9 +21,9 @@ from db import (
     ReviewBundleRecord,
     ReviewBundleRepository,
 )
-from engine import ApprovalDecision, ConfigurationError, EventCreate, JobState, RetentionConfig
-from promotion_target import TargetConflictError, TargetUnavailableError, target_lock
-from worktree import WorktreeConflictError, WorktreeManager, WorktreeUnavailableError
+from .engine import ApprovalDecision, ConfigurationError, EventCreate, JobState, RetentionConfig
+from .promotion_target import TargetConflictError, TargetUnavailableError, target_lock
+from .worktree import WorktreeConflictError, WorktreeManager, WorktreeUnavailableError
 
 _STARTED = "job.worktree.cleanup.started"
 _COMPLETED = "job.worktree.cleanup.completed"

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from db import (
+from .db import (
     JobAlreadyExistsError,
     JobRecord,
     JobRepository,
@@ -17,7 +17,7 @@ from db import (
     ProjectRepository,
     ProjectRepositoryError,
 )
-from engine import (
+from .engine import (
     CONFIG_VERSION,
     JobCreate,
     JobRuntime,
@@ -25,8 +25,8 @@ from engine import (
     ProjectConfig,
     run_process,
 )
-from team_config import TeamConfigError
-from team_store import TeamRepository, TeamStoreError
+from .team_config import TeamConfigError
+from .team_store import TeamRepository, TeamStoreError
 
 PROJECT_POLICY_VERSION = 1
 _ALLOWED_FIELDS = frozenset({"project_id", "request", "runtime", "model", "agent_id"})

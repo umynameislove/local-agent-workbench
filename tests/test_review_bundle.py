@@ -10,8 +10,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from db import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import (
     LATEST_SCHEMA_VERSION,
     MIGRATIONS,
     AtomicTransitionService,
@@ -22,7 +22,7 @@ from db import (
     ReviewBundleRepository,
     VerificationRepository,
 )
-from engine import (
+from local_agent_workbench.engine import (
     JobCreate,
     JobRuntime,
     JobState,
@@ -32,13 +32,13 @@ from engine import (
     VerificationCreate,
     VerificationOutcome,
 )
-from review_bundle import (
+from local_agent_workbench.review_bundle import (
     ReviewBundleMissingError,
     ReviewBundleService,
     ReviewBundleStateError,
     ReviewBundleUnavailableError,
 )
-from secret_gate import PreReviewSecretGate
+from local_agent_workbench.secret_gate import PreReviewSecretGate
 
 
 def git(repository: Path, *arguments: str) -> str:

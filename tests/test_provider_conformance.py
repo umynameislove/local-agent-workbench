@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from provider_conformance import ProviderConformanceSubject, ProviderContractTests
 
-from engine import FakeProvider, JobRuntime, ProviderCapability
+from local_agent_workbench.engine import FakeProvider, JobRuntime, ProviderCapability
 
 
 class TestFakeProviderConformance(ProviderContractTests):

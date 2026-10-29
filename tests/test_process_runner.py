@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from engine import ProcessRunnerError, ProcessTimeoutError, run_process
+from local_agent_workbench.engine import ProcessRunnerError, ProcessTimeoutError, run_process
 
 
 def test_arguments_are_literal_and_exit_output_is_preserved(tmp_path: Path):

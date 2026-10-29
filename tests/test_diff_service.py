@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from diff_service import (
+from local_agent_workbench.diff_service import (
     DiffConflictError,
     DiffContentKind,
     DiffLimitError,

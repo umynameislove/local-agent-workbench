@@ -8,9 +8,9 @@ from copy import deepcopy
 import pytest
 from test_telegram_gateway import OWNER, TOKEN, status, update
 
-from db import MIGRATIONS, Database
-from remote_commands import RemoteJournal, RemoteJournalError
-from telegram_gateway import GatewayError, TelegramGateway
+from local_agent_workbench.db import MIGRATIONS, Database
+from local_agent_workbench.remote_commands import RemoteJournal, RemoteJournalError
+from local_agent_workbench.telegram_gateway import GatewayError, TelegramGateway
 
 CHANNEL = TOKEN.split(":")[0]
 

@@ -43,7 +43,7 @@ jobs:
         run: uv sync --frozen --all-groups
 
       - name: Verify repository boundary
-        run: uv run python repo_boundary.py .
+        run: uv run python scripts/repo_boundary.py .
 
       - name: Run lint checks
         run: uv run ruff check .
@@ -56,3 +56,14 @@ jobs:
 
       - name: Verify workspace controller
         run: node --test tests/workspace_client.test.cjs
+
+      - name: Verify installed distribution
+        run: |
+          uv build --wheel --sdist --out-dir "$RUNNER_TEMP/workbench-dist"
+          uv venv "$RUNNER_TEMP/workbench-install"
+          uv export --frozen --no-dev --no-emit-project --output-file "$RUNNER_TEMP/workbench-runtime.txt"
+          uv pip install --python "$RUNNER_TEMP/workbench-install/bin/python" --require-hashes --requirements "$RUNNER_TEMP/workbench-runtime.txt"
+          uv pip install --python "$RUNNER_TEMP/workbench-install/bin/python" --no-deps "$RUNNER_TEMP/workbench-dist/"*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/workbench-install/bin/agent-workbench" --help
+          "$RUNNER_TEMP/workbench-install/bin/python" -I -c 'import importlib, pkgutil, local_agent_workbench; from local_agent_workbench.workspace_ui import asset; [importlib.import_module(m.name) for m in pkgutil.walk_packages(local_agent_workbench.__path__, local_agent_workbench.__name__ + ".")]; assert b"WorkbenchProjectControl" in asset("project_control.js").body; assert "unsafe-inline" not in asset("index.html").headers["content-security-policy"]'

@@ -9,8 +9,8 @@ import httpx
 import pytest
 from test_approval_service import decide, prepare, request, review
 
-from app import create_app
-from engine import JobState, JobUpdate
+from local_agent_workbench.app import create_app
+from local_agent_workbench.engine import JobState, JobUpdate
 
 URL = "/api/jobs/job-001/approval"
 

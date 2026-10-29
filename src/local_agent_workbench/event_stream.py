@@ -5,7 +5,7 @@ import json
 import math
 from collections.abc import AsyncIterator
 
-from db import (
+from .db import (
     EventNotFoundError,
     EventRecord,
     EventRepository,

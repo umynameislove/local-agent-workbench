@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from db import (
+from .db import (
     AtomicTransitionConflictError,
     AtomicTransitionError,
     AtomicTransitionRecord,
@@ -21,9 +21,9 @@ from db import (
     JobRepositoryError,
     JobValidationError,
 )
-from diff_service import DiffServiceError, ReadOnlyDiffService
-from diff_types import DiffContentKind, DiffStatus, UnifiedDiff, valid_object_id
-from engine import EventCreate, JobState, JobUpdate
+from .diff_service import DiffServiceError, ReadOnlyDiffService
+from .diff_types import DiffContentKind, DiffStatus, UnifiedDiff, valid_object_id
+from .engine import EventCreate, JobState, JobUpdate
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _PATTERNS = (

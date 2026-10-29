@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from provider_conformance import ProviderConformanceSubject, ProviderContractTests
 
-from codex_accounts import CodexAccountPool, codex_account_slots
-from codex_adapter import CodexAdapter
-from engine import (
+from local_agent_workbench.codex_accounts import CodexAccountPool, codex_account_slots
+from local_agent_workbench.codex_adapter import CodexAdapter
+from local_agent_workbench.engine import (
     AdapterError,
     AdapterSession,
     AdapterStart,
@@ -506,7 +506,7 @@ async def test_cancel_reaps_parent_but_does_not_claim_group_stopped_when_signal_
     def deny_group_signal(_process_group: int, _signal_number: int) -> None:
         raise PermissionError
 
-    monkeypatch.setattr("codex_adapter.os.killpg", deny_group_signal)
+    monkeypatch.setattr("local_agent_workbench.codex_adapter.os.killpg", deny_group_signal)
     await provider.cancel(session)
     events = await collect(provider, session)
 

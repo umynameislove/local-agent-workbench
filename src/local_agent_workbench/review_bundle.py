@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from db import (
+from .db import (
     EventRecord,
     EventRepository,
     EventRepositoryError,
@@ -23,11 +23,11 @@ from db import (
     VerificationRepository,
     VerificationRepositoryError,
 )
-from diff_service import DiffServiceError, ReadOnlyDiffService
-from diff_types import DiffContentKind, DiffStatus, UnifiedDiff, valid_object_id
-from engine import JobState, VerificationOutcome
-from logging_setup import REDACTED, redact_text
-from secret_gate import SecretScanner
+from .diff_service import DiffServiceError, ReadOnlyDiffService
+from .diff_types import DiffContentKind, DiffStatus, UnifiedDiff, valid_object_id
+from .engine import JobState, VerificationOutcome
+from .logging_setup import REDACTED, redact_text
+from .secret_gate import SecretScanner
 
 
 class ReviewBundleError(RuntimeError):

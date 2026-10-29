@@ -6,8 +6,8 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
 const crypto = require("node:crypto");
-const code = fs.readFileSync(path.join(__dirname, "../workspace_ui/workspace.js"), "utf8");
-const projectCode = fs.readFileSync(path.join(__dirname, "../workspace_ui/project_control.js"), "utf8");
+const code = fs.readFileSync(path.join(__dirname, "../src/local_agent_workbench/workspace_ui/workspace.js"), "utf8");
+const projectCode = fs.readFileSync(path.join(__dirname, "../src/local_agent_workbench/workspace_ui/project_control.js"), "utf8");
 const pendingDigests = new Set();
 const flush = async () => {
   for (let n = 0; n < 8; n++) {

@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_events import CodexEventTranslator, CodexNativeProtocolError
-from engine import JobRuntime, RuntimeEventKind
+from local_agent_workbench.codex_events import CodexEventTranslator, CodexNativeProtocolError
+from local_agent_workbench.engine import JobRuntime, RuntimeEventKind
 
 
 def line(value: object) -> bytes:

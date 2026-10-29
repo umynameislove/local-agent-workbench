@@ -10,9 +10,15 @@ import pytest
 from fastapi.responses import StreamingResponse
 from starlette.requests import Request
 
-from app import create_app
-from db import Database, EventRepository, EventValidationError, JobRepository, ProjectRepository
-from engine import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import (
+    Database,
+    EventRepository,
+    EventValidationError,
+    JobRepository,
+    ProjectRepository,
+)
+from local_agent_workbench.engine import (
     EventCreate,
     JobCreate,
     JobRuntime,
@@ -21,7 +27,7 @@ from engine import (
     ProjectConfig,
     Sensitivity,
 )
-from event_stream import EventStreamCursorError, EventStreamService
+from local_agent_workbench.event_stream import EventStreamCursorError, EventStreamService
 
 
 def project() -> ProjectConfig:

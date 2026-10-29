@@ -12,14 +12,14 @@ from typing import Annotated
 from fastapi import Body, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from approval_service import (
+from .approval_service import (
     ApprovalInputError,
     ApprovalMissingError,
     ApprovalService,
     ApprovalStateError,
     ApprovalUnavailableError,
 )
-from db import (
+from .db import (
     ApprovalRepository,
     ApprovalWorkflowRepository,
     AtomicTransitionService,
@@ -42,8 +42,8 @@ from db import (
     UsageRepository,
     VerificationRepository,
 )
-from diff_service import DiffServiceError
-from engine import (
+from .diff_service import DiffServiceError
+from .engine import (
     APP_VERSION,
     RUNTIME_ENV,
     JobRuntime,
@@ -53,24 +53,24 @@ from engine import (
     load_optional_config,
     resolve_runtime_home,
 )
-from event_stream import EventStreamCursorError, EventStreamService
-from job_submission import (
+from .event_stream import EventStreamCursorError, EventStreamService
+from .job_submission import (
     JobSubmissionConflictError,
     JobSubmissionNotFoundError,
     JobSubmissionService,
     JobSubmissionUnavailableError,
     JobSubmissionValidationError,
 )
-from logging_setup import configure_logging
-from native_execution import NativeExecutionService
-from native_store import NativeAttemptRepository, NativeConflictError, NativeStoreError
-from planning import (
+from .logging_setup import configure_logging
+from .native_execution import NativeExecutionService
+from .native_store import NativeAttemptRepository, NativeConflictError, NativeStoreError
+from .planning import (
     PlanningConflictError,
     PlanningNotFoundError,
     PlanningUnavailableError,
     ReadOnlyPlanningService,
 )
-from promotion import (
+from .promotion import (
     PromotionConflictError,
     PromotionInputError,
     PromotionMissingError,
@@ -78,33 +78,33 @@ from promotion import (
     PromotionService,
     PromotionUnavailableError,
 )
-from retention import (
+from .retention import (
     RetentionConflictError,
     RetentionInputError,
     RetentionMissingError,
     RetentionService,
     RetentionUnavailableError,
 )
-from review_bundle import (
+from .review_bundle import (
     ReviewBundleMissingError,
     ReviewBundleService,
     ReviewBundleStateError,
     ReviewBundleUnavailableError,
 )
-from secret_gate import (
+from .secret_gate import (
     PreReviewSecretGate,
     SecretGateBlockedError,
     SecretGateConflictError,
     SecretGateNotFoundError,
     SecretGateUnavailableError,
 )
-from task_workflow import TaskWorkflow, WorkflowConflictError
-from team_config import AgentSystem, TeamConfigError
-from team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
-from verification import VerificationError, VerificationRunner
-from workspace_control import WorkspaceControl
-from workspace_ui import asset
-from worktree import (
+from .task_workflow import TaskWorkflow, WorkflowConflictError
+from .team_config import AgentSystem, TeamConfigError
+from .team_store import TeamConflictError, TeamNotFoundError, TeamRepository, TeamStoreError
+from .verification import VerificationError, VerificationRunner
+from .workspace_control import WorkspaceControl
+from .workspace_ui import asset
+from .worktree import (
     WorktreeConflictError,
     WorktreeManager,
     WorktreeNotFoundError,
@@ -807,7 +807,7 @@ def main(argv: list[str] | None = None) -> None:
 
     import uvicorn
 
-    uvicorn.run("app:app", host="127.0.0.1", port=8765, reload=False)
+    uvicorn.run("local_agent_workbench.app:app", host="127.0.0.1", port=8765, reload=False)
 
 
 if __name__ == "__main__":

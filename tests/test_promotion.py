@@ -9,8 +9,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from engine import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.engine import (
     JobCreate,
     JobRuntime,
     JobState,
@@ -204,7 +204,7 @@ async def test_preflight_rejects_changed_evidence_without_target_write(
 async def test_failed_apply_requires_reconciliation_and_never_retries(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import promotion_target
+    from local_agent_workbench import promotion_target
 
     api = create_app({"AGENT_WORKBENCH_HOME": str(tmp_path / "runtime")})
     async with api.router.lifespan_context(api):
@@ -320,7 +320,7 @@ async def test_concurrent_retry_applies_once(tmp_path: Path) -> None:
 async def test_post_apply_extra_change_is_not_claimed_complete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import promotion_target
+    from local_agent_workbench import promotion_target
 
     api = create_app({"AGENT_WORKBENCH_HOME": str(tmp_path / "runtime")})
     async with api.router.lifespan_context(api):
@@ -396,7 +396,7 @@ async def test_promotion_rejects_cross_origin_client(tmp_path: Path) -> None:
 
 @pytest.mark.anyio
 async def test_external_project_lock_blocks_before_writing(tmp_path: Path) -> None:
-    from promotion_target import target_lock
+    from local_agent_workbench.promotion_target import target_lock
 
     api = create_app({"AGENT_WORKBENCH_HOME": str(tmp_path / "runtime")})
     async with api.router.lifespan_context(api):
@@ -433,7 +433,7 @@ async def test_git_rename_is_promoted_from_reviewed_patch(tmp_path: Path) -> Non
 async def test_restart_does_not_retry_uncertain_apply(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import promotion_target
+    from local_agent_workbench import promotion_target
 
     runtime = tmp_path / "runtime"
     api = create_app({"AGENT_WORKBENCH_HOME": str(runtime)})

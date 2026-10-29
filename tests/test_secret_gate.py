@@ -8,10 +8,16 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import create_app
-from db import AtomicTransitionService, Database, EventRepository, JobRepository, ProjectRepository
-from diff_types import DiffContentKind, DiffEntry, DiffStatus, UnifiedDiff
-from engine import (
+from local_agent_workbench.app import create_app
+from local_agent_workbench.db import (
+    AtomicTransitionService,
+    Database,
+    EventRepository,
+    JobRepository,
+    ProjectRepository,
+)
+from local_agent_workbench.diff_types import DiffContentKind, DiffEntry, DiffStatus, UnifiedDiff
+from local_agent_workbench.engine import (
     JobCreate,
     JobRuntime,
     JobState,
@@ -20,7 +26,7 @@ from engine import (
     ProjectConfig,
     Sensitivity,
 )
-from secret_gate import (
+from local_agent_workbench.secret_gate import (
     PreReviewSecretGate,
     SecretGateBlockedError,
     SecretGateConflictError,
