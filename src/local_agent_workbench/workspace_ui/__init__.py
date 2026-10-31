@@ -10,9 +10,9 @@ from importlib.resources import files
 from fastapi import Response
 
 
-@lru_cache(maxsize=3)
+@lru_cache(maxsize=4)
 def asset(name: str) -> Response:
-    if name not in {"index.html", "workspace.js", "project_control.js"}:
+    if name not in {"index.html", "workspace.js", "project_control.js", "workbench_shell.js"}:
         raise ValueError("Unknown workspace asset.")
     content = files(__package__).joinpath(name).read_text(encoding="utf-8")
     headers = {"Cache-Control": "no-store"}
