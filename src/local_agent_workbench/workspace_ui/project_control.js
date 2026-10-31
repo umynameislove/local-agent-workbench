@@ -1,6 +1,6 @@
 "use strict";
 
-window.WorkbenchProjectControl = ({request, onSelect, onSaved}) => {
+window.WorkbenchProjectControl = ({request, onSelect, onSaved, onOpen = () => {}}) => {
   const ui = Object.fromEntries(["settings", "settings-open", "settings-close", "settings-project",
     "settings-status", "team-enabled", "team-members", "team-save", "team-reload", "connection-models",
     "project-team", "attempt-list", "attention-list", "attempt-status", "attention-count"]
@@ -43,7 +43,13 @@ window.WorkbenchProjectControl = ({request, onSelect, onSaved}) => {
     ui["team-enabled"].checked = draft?.enabled || false;
     for (const profile of settings?.profiles || []) {
       const member = settings.team?.agent_ids.includes(profile.id);
-      if (member) ui["project-team"].append(element("li", `${profile.id} · ${profile.role.replaceAll("_", " ")} · Configured${profile.executable ? ", native supported" : ", unavailable"}`));
+      if (member) {
+        const item = element("li", ""), copy = element("span", "", "member-copy");
+        copy.append(element("strong", profile.id), element("small", `${profile.role.replaceAll("_", " ")} / ${profile.model || "Account default"}`));
+        item.append(element("span", profile.id.slice(0, 2).toLocaleUpperCase(), "avatar"), copy,
+          element("span", profile.executable ? "Native" : "Unavailable", "member-state"));
+        ui["project-team"].append(item);
+      }
       const label = document.createElement("label"), input = document.createElement("input");
       input.type = "checkbox"; input.value = profile.id; input.checked = draft?.ids.includes(profile.id) || false;
       input.dataset.eligible = String(profile.eligible); input.setAttribute("aria-label", `Include ${profile.id}`);
@@ -67,6 +73,7 @@ window.WorkbenchProjectControl = ({request, onSelect, onSaved}) => {
       ui["connection-models"].append(element("li", `${profile.connection_id} · ${profile.runtime} · ${profile.model || "Native account default"}. ${profile.connection_enabled ? "Configured enabled" : "Configured disabled"}; authentication and quota not checked.`));
     }
     if (!ui["project-team"].children.length) ui["project-team"].append(element("li", "No configured team members available."));
+    document.getElementById("team-count").textContent = `${settings?.team?.agent_ids.length || 0} configured`;
     controls();
   };
   const loadSettings = async (reset = false) => {
@@ -140,16 +147,19 @@ window.WorkbenchProjectControl = ({request, onSelect, onSaved}) => {
       const add = (target, row, detail) => {
         const button = element("button", "", "task"); button.type = "button";
         button.dataset.attempt = row.attempt_id || ""; button.dataset.attentionJob = row.job_id;
+        button.dataset.phase = row.phase || ""; button.dataset.outcome = row.outcome || "";
+        button.dataset.reconcile = String(Boolean(row.requires_reconciliation));
         button.append(element("span", row.title), element("small", detail));
         button.addEventListener("click", () => onSelect(row.project_id, row.job_id)); target.append(button);
         if (focused && [row.attempt_id, row.job_id].includes(focused)) button.focus({preventScroll: true});
       };
       for (const row of value.attention) add(ui["attention-list"], row, row.state.replaceAll("_", " "));
       for (const row of value.attempts) add(ui["attempt-list"], row,
-        `${row.profile_id} · ${row.runtime} · ${row.cancel_requested ? "Cancellation requested · " : ""}${row.requires_reconciliation ? "Reconciliation needed · " : ""}${row.phase}${row.outcome ? `, ${row.outcome}` : ""} · Last event ${new Date(row.last_event_at).toLocaleString()}`);
+        `${row.profile_id} / ${row.model || row.runtime} · ${row.cancel_requested ? "Cancellation requested · " : ""}${row.requires_reconciliation ? "Reconciliation needed · " : ""}${row.outcome || row.phase} · ${new Date(row.last_event_at).toLocaleTimeString()}`);
       if (!value.attention.length) ui["attention-list"].append(element("p", "No recorded tasks need attention.", "subtle"));
       if (!value.attempts.length) ui["attempt-list"].append(element("p", "No native attempts recorded.", "subtle"));
-      ui["attempt-status"].textContent = `${value.attempt_total} recorded attempts. Checked ${new Date(value.observed_at).toLocaleTimeString()}. ${value.attempts_truncated || value.attention_truncated ? "Showing up to 50 rows in each list. " : ""}Recorded state is not a provider heartbeat. One native execution lane.`;
+      ui["attempt-status"].textContent = `${value.attempt_total} recorded runs. Updated ${new Date(value.observed_at).toLocaleTimeString()}.${value.attempts_truncated || value.attention_truncated ? " Latest 50 shown." : ""}`;
+      ui["attempt-status"].title = "Recorded state is not a provider heartbeat. One native execution lane.";
     } catch {
       if (id === project && version === epoch && reading === activityRead) {
         ui["attempt-status"].textContent = "Activity unavailable. Any displayed rows are last known state; refresh to retry.";
@@ -163,7 +173,7 @@ window.WorkbenchProjectControl = ({request, onSelect, onSaved}) => {
   });
   ui["team-save"].addEventListener("click", save);
   ui["team-reload"].addEventListener("click", () => loadSettings(true));
-  ui["settings-open"].addEventListener("click", () => { ui.settings.showModal(); loadSettings(); });
+  ui["settings-open"].addEventListener("click", () => { onOpen(); ui.settings.showModal(); loadSettings(); });
   ui["settings-close"].addEventListener("click", () => ui.settings.close());
   ui.settings.addEventListener("close", () => ui["settings-open"].focus());
   return {

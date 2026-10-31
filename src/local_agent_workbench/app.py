@@ -46,6 +46,7 @@ from .diff_service import DiffServiceError
 from .engine import (
     APP_VERSION,
     RUNTIME_ENV,
+    ConfigurationError,
     JobRuntime,
     RetentionConfig,
     RuntimeHome,
@@ -62,6 +63,7 @@ from .job_submission import (
     JobSubmissionValidationError,
 )
 from .logging_setup import configure_logging
+from .model_library import LibraryConflictError, ModelLibrary
 from .native_execution import NativeExecutionService
 from .native_store import NativeAttemptRepository, NativeConflictError, NativeStoreError
 from .planning import (
@@ -283,6 +285,30 @@ def create_app(
     @api.get("/project_control.js", include_in_schema=False)
     async def project_control_script() -> Response:
         return asset("project_control.js")
+
+    @api.get("/workbench_shell.js", include_in_schema=False)
+    async def workbench_shell_script() -> Response:
+        return asset("workbench_shell.js")
+
+    @api.get("/api/settings/library")
+    def read_model_library(request: Request) -> dict:
+        try:
+            return ModelLibrary(runtime.config, request.app.state.team_repository.system).read()
+        except ConfigurationError as error:
+            raise HTTPException(503, str(error)) from error
+
+    @api.post("/api/settings/library")
+    def add_model_library(request: Request, payload: Annotated[object, Body()]) -> dict:
+        try:
+            return ModelLibrary(runtime.config, request.app.state.team_repository.system).add(
+                payload
+            )
+        except LibraryConflictError as error:
+            raise HTTPException(409, str(error)) from error
+        except TeamConfigError as error:
+            raise HTTPException(422, str(error)) from error
+        except ConfigurationError as error:
+            raise HTTPException(503, str(error)) from error
 
     @api.get("/api/health")
     async def health(request: Request) -> dict[str, object]:

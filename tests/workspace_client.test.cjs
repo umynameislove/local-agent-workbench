@@ -8,6 +8,7 @@ const path = require("node:path");
 const crypto = require("node:crypto");
 const code = fs.readFileSync(path.join(__dirname, "../src/local_agent_workbench/workspace_ui/workspace.js"), "utf8");
 const projectCode = fs.readFileSync(path.join(__dirname, "../src/local_agent_workbench/workspace_ui/project_control.js"), "utf8");
+const shellCode = fs.readFileSync(path.join(__dirname, "../src/local_agent_workbench/workspace_ui/workbench_shell.js"), "utf8");
 const pendingDigests = new Set();
 const flush = async () => {
   for (let n = 0; n < 8; n++) {
@@ -41,8 +42,8 @@ function harness(options = {}) {
     get firstElementChild() { return this.children[0]; }
     remove() { this.parent.children = this.parent.children.filter((item) => item !== this); }
     focus() { document.activeElement = this; }
-    addEventListener(name, callback) { this.listeners[name] = callback; }
-    fire(name, extra = {}) { return this.listeners[name]?.({preventDefault() {}, ...extra}); }
+    addEventListener(name, callback) { (this.listeners[name] ||= []).push(callback); }
+    fire(name, extra = {}) { return Promise.all((this.listeners[name] || []).map((callback) => callback({preventDefault() {}, ...extra}))); }
     requestSubmit() { return this.fire("submit"); }
     showModal() { this.open = true; }
     close() { this.open = false; this.fire("close"); }
@@ -115,12 +116,14 @@ function harness(options = {}) {
     clearTimeout(id) { timers.delete(id); }, setInterval(callback) { intervals.push(callback); },
   };
   document.getElementById("runtime").value = "auto";
+  vm.runInNewContext(shellCode, context, {filename: "workbench_shell.js"});
   vm.runInNewContext(projectCode, context, {filename: "project_control.js"});
   vm.runInNewContext(code, context, {filename: "workspace.js"});
   const node = (id) => nodes.get(id);
   const clickTask = async (id) => { await node("task-list").children.find((item) => item.dataset.job === id).fire("click"); await flush(); };
   const clickProject = async (id) => { await node("project-list").children.find((item) => item.tag === "button" && item.children[0]?.textContent === id).fire("click"); await flush(); };
   return {node, streams, calls, jobs, response, clickTask, clickProject,
+    focused: () => document.activeElement,
     handle(callback) { handler = callback; }, url() { return currentURL; },
     type(value) { node("prompt").value = value; node("prompt").fire("input"); },
     async tick() { for (const [id, callback] of [...timers]) { timers.delete(id); callback(); } await flush(); },
@@ -328,7 +331,7 @@ test("task actions are sent once and a late result cannot change project selecti
   delayed.resolve(h.response({state: "queued"})); await pending;
   assert.equal(new URL(h.url()).searchParams.get("project"), "beta");
   assert.equal(h.calls.filter((item) => item.url === "/api/jobs/A/plan").length, 1);
-  assert.equal(h.node("task-title").textContent, "What would you like to work on?");
+  assert.equal(h.node("task-title").textContent, "New task");
 });
 
 test("malformed ledger identities close the stream and refresh replays safely", async () => {
@@ -873,7 +876,8 @@ test("recorded attempts and configured profiles stay separate with exact task li
   assert.match(h.node("attempt-list").children[0].children[1].textContent, /old-profile.*Cancellation requested.*Reconciliation needed/);
   h.node("attempt-list").children[0].fire("click"); await flush();
   assert.equal(new URL(h.url()).searchParams.get("task"), "A");
-  assert.match(h.node("attempt-status").textContent, /not a provider heartbeat/);
+  assert.match(h.node("attempt-status").textContent, /recorded runs/);
+  assert.match(h.node("attempt-status").title, /not a provider heartbeat/);
 });
 
 test("delayed project settings and attempt reads cannot overwrite a newer A to B to A view", async () => {
@@ -1036,4 +1040,128 @@ test("the bounded editor preserves Lead membership and explains an unavailable L
   assert.equal(h.node("team-enabled").disabled, true);
   assert.equal(h.node("team-save").disabled, true);
   assert.match(h.node("settings-status").textContent, /Lead unavailable.*runtime configuration/);
+});
+
+const libraryValue = (revision = "a".repeat(64)) => ({revision, editable: true,
+  connections: [{id: "subscription", kind: "codex", enabled: true, credential_configured: true, status: "loaded"}],
+  models: [{id: "native", connection_id: "subscription", model: "configured-model", verified: true,
+    capabilities: ["tools"], status: "loaded"}],
+});
+const shellHandle = (url) => url === "/api/settings/library" ? reply(libraryValue())
+  : url.endsWith("/agents") ? reply({project_id: url.includes("/alpha/") ? "alpha" : "beta",
+    agents: [{id: "coder", role: "implementer", runtime: "codex", model: "configured-model"}]}) : projectHandle(url);
+
+test("settings navigation and searchable models select a profile without starting a worker", async () => {
+  const h = harness({handle: shellHandle}); await flush();
+  await h.node("global-settings").fire("click"); await flush();
+  assert.equal(h.node("settings").open, true);
+  assert.equal(h.node("settings-panel-connections").hidden, false);
+  await h.node("settings-tab-connections").fire("keydown", {key: "ArrowDown"});
+  assert.equal(h.node("settings-tab-models")["aria-selected"], "true");
+  assert.equal(h.node("settings-panel-models").hidden, false);
+  assert.equal(h.node("library-models").children.length, 1);
+  await h.node("settings-close").fire("click");
+  assert.equal(h.node("settings").open, false);
+  assert.equal(h.focused(), h.node("global-settings"));
+  await h.node("model-open").fire("click");
+  h.node("model-search").value = "configured-model"; await h.node("model-search").fire("input");
+  assert.equal(h.node("model-options").children.length, 1);
+  await h.node("model-options").children[0].fire("click");
+  assert.equal(h.node("agent").value, "coder");
+  assert.match(h.node("model-open").textContent, /configured-model/);
+  assert.equal(h.node("model-picker").open, false);
+  assert.equal(writes(h).length, 0);
+  h.type("A bounded request"); await h.node("composer").fire("submit"); await flush();
+  assert.equal(decisionBody(h).agent_id, "coder");
+  assert.equal(decisionBody(h).model, undefined);
+  assert.equal(h.node("model-open").disabled, true);
+});
+
+test("a profile picker closes across projects and historical task views remain immutable", async () => {
+  const h = harness({handle: shellHandle}); await flush();
+  h.type("Alpha draft"); await h.node("model-open").fire("click");
+  const previous = h.node("model-options").children[1];
+  await h.clickProject("beta");
+  assert.equal(h.node("model-picker").open, false);
+  await previous.fire("click");
+  assert.equal(h.node("agent").value, "");
+  await h.clickProject("alpha"); assert.equal(h.node("prompt").value, "Alpha draft");
+  await h.clickTask("A"); await h.node("model-open").fire("click");
+  assert.equal(h.node("model-picker").open, false);
+  assert.equal(writes(h).length, 0);
+  await h.node("new-from-history").fire("click");
+  assert.equal(h.node("prompt").value, "Alpha draft");
+});
+
+test("additive setup sends identities only and saved models cannot enter the active picker", async () => {
+  const h = harness({handle: shellHandle}); await flush();
+  await h.node("global-settings").fire("click"); await flush();
+  await h.node("connection-add").fire("click");
+  h.node("library-id").value = "research"; h.node("library-source").value = "openrouter";
+  let received;
+  h.handle((url, init) => {
+    if (url === "/api/settings/library" && init.method === "POST") {
+      received = JSON.parse(init.body);
+      const stored = libraryValue("b".repeat(64));
+      stored.connections.push({id: "research", kind: "openrouter", enabled: false, credential_configured: false, status: "restart_required"});
+      return reply(stored);
+    }
+    return shellHandle(url);
+  });
+  await h.node("library-form").fire("submit"); await flush();
+  assert.deepEqual(received, {revision: "a".repeat(64), kind: "connection", entry: {id: "research", kind: "openrouter"}});
+  assert.match(h.node("library-status").textContent, /Saved inactive setup/);
+  assert.equal(h.node("library-form").hidden, true);
+  assert.equal(h.node("library-connections").children.length, 2);
+  assert.equal(h.focused(), h.node("connection-add"));
+  assert.equal(h.node("agent").children.length, 2);
+  assert.equal(writes(h).length, 1);
+});
+
+test("uncertain setup keeps its fields and never retries through another dialog action", async () => {
+  const pending = deferred();
+  const h = harness({handle: (url, init) => url === "/api/settings/library" && init.method === "POST"
+    ? pending.promise : shellHandle(url)}); await flush();
+  await h.node("global-settings").fire("click"); await flush();
+  await h.node("connection-add").fire("click"); h.node("library-id").value = "retained";
+  h.node("library-source").value = "local";
+  const saving = h.node("library-form").fire("submit");
+  await h.node("library-form").fire("submit");
+  pending.reject(new Error("Lost")); await saving; await flush();
+  assert.equal(writes(h).length, 1);
+  assert.equal(h.node("library-save").disabled, true);
+  assert.equal(h.node("library-id").value, "retained");
+  await h.node("settings-tab-models").fire("click"); await flush();
+  await h.node("settings-tab-connections").fire("click"); await flush();
+  await h.node("library-form").fire("submit");
+  assert.equal(writes(h).length, 1);
+});
+
+test("a stale library read cannot erase a saved setup or an unsaved setup form", async () => {
+  const late = deferred(); let reads = 0;
+  const h = harness({handle: (url) => url === "/api/settings/library" && ++reads === 1 ? late.promise : shellHandle(url)});
+  await flush(); await h.node("global-settings").fire("click");
+  await h.node("settings-tab-models").fire("click"); await flush();
+  late.resolve(reply(libraryValue("f".repeat(64)))); await flush();
+  await h.node("settings-tab-connections").fire("click"); await flush();
+  await h.node("connection-add").fire("click"); h.node("library-id").value = "keep-draft";
+  await h.node("settings-tab-general").fire("click");
+  assert.equal(h.node("library-form").hidden, true);
+  await h.node("settings-tab-connections").fire("click"); await flush();
+  assert.equal(h.node("library-form").hidden, false);
+  assert.equal(h.node("library-id").value, "keep-draft");
+  assert.equal(writes(h).length, 0);
+});
+
+test("system payloads are disclosed separately while model text stays readable and inert", async () => {
+  const h = harness(); await flush(); await h.clickTask("A");
+  const source = h.streams.at(-1);
+  source.emit("1", "A", {result: "<script>not executable</script>"});
+  source.emit("2", "A", {text: "The model answer <img src=x>"});
+  const [system, answer] = h.node("activity").children;
+  assert.equal(system.dataset.kind, "system");
+  assert.equal(system.children[2].textContent, "");
+  assert.equal(system.children[3].tag, "details");
+  assert.equal(answer.dataset.kind, "message");
+  assert.equal(answer.children[2].textContent, "The model answer <img src=x>");
 });

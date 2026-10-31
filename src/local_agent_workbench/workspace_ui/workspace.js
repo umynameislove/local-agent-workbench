@@ -58,7 +58,7 @@ window.WorkbenchReview = ({request, onChange}) => {
     else if (active()) message = "Review the ID, scope and expiry below. Each decision is checked against the live worktree.";
     else if (canPrepare()) message = "Review readiness is recorded. Prepare a frozen snapshot; this does not request approval.";
     if (ui["review-message"].textContent !== message) ui["review-message"].textContent = message;
-    ui["review-summary"].textContent = job && status ? `${message}${bundle ? ` Snapshot ${bundle.bundle_hash.slice(0, 12)}.` : ""}${approval && !approval.decision ? ` Expires ${new Date(approval.expires_at).toLocaleString()}.` : ""}` : "";
+    ui["review-summary"].textContent = job && bundle ? `Snapshot ${bundle.bundle_hash.slice(0, 12)}${approval ? ` / ${label(approval.decision || approval.state)}${pendingExpired ? ", expired" : ""}` : ""}` : "";
   };
   const renderEvidence = () => {
     ui.review.hidden = !job;
@@ -447,6 +447,11 @@ window.WorkbenchExecution = ({request, onChange}) => {
   const projectControl = window.WorkbenchProjectControl({request,
     onSelect: (project, job) => project === state.project ? selectTask(job) : selectProject(project, job),
     onSaved: (project) => { if (project === state.project) loadAgents(); },
+    onOpen: () => shell.settingsTab("team"),
+  });
+  const shell = window.WorkbenchShell({request,
+    onChoose: (id) => { ui.agent.value = id; draft().agent = id; renderTask(); },
+    onNewTask: () => selectTask(null, true),
   });
   const loadAgents = async () => {
     const project = state.project, epoch = state.projectEpoch, reading = ++state.agentEpoch;
@@ -559,10 +564,9 @@ window.WorkbenchExecution = ({request, onChange}) => {
     const project = state.projects.find((item) => item.id === state.project);
     const job = state.job;
     ui.breadcrumb.textContent = state.project || "Workspace";
-    ui["task-title"].textContent = job ? job.title : state.selected ? "Loading task…" : "What would you like to work on?";
+    ui["task-title"].textContent = job ? job.title : state.selected ? "Loading task…" : "New task";
     ui["task-state"].textContent = job ? label(job.state) : state.selected ? "Loading" : "New task";
-    ui["task-meta"].textContent = job ? `${job.id} · Requested ${label(job.runtime)} · Updated ${new Date(job.updated_at).toLocaleString()}`
-      : "A stored request, a demo plan and a visible worktree boundary.";
+    ui["task-meta"].textContent = job ? `Updated ${new Date(job.updated_at).toLocaleString()}` : "";
     ui.attention.hidden = !job || !attentionStates.has(job.state);
     ui.attention.textContent = job ? `Needs you: ${label(job.state)}. See the next step below.` : "";
     ui.welcome.hidden = Boolean(state.selected);
@@ -587,15 +591,18 @@ window.WorkbenchExecution = ({request, onChange}) => {
     ui.composer.dataset.mode = state.selected ? "history" : "draft";
     ui["composer-wrap"].dataset.mode = ui.composer.dataset.mode;
     ui.prompt.disabled = !editable; ui.runtime.disabled = !editable || Boolean(ui.agent.value);
+    ui.runtime.hidden = Boolean(ui.agent.value);
     ui.agent.disabled = !editable || state.agentsLoading;
     const unavailableAgent = Boolean(ui.agent.value) && !state.agents.some((a) => a.id === ui.agent.value);
     ui["create-task"].disabled = !editable || state.agentsLoading || unavailableAgent || !ui.prompt.value.trim();
-    ui["create-task"].textContent = state.creating ? "Creating…" : "Create task ↗";
+    ui["create-task"].textContent = state.creating ? "Creating…" : "Create task";
     ui["composer-help"].textContent = state.selected
       ? "This is a recorded task. Follow up chat is not connected yet. Choose New task to create a separate request."
       : state.creating ? "Creating one task. If the connection drops, inspect task history before submitting again."
       : unavailableAgent ? "The selected profile is unavailable. Explicitly choose another profile or Record only before submitting."
       : "Select a configured project agent for native work, or record a request only. Creating a task never starts execution or paid inference.";
+    shell.update({project: state.project, selected: ui.agent.value, agents: state.agents,
+      editable: editable && !state.agentsLoading});
   };
   const loadTasks = async (older = false) => {
     if (!state.project || (older && (!state.cursor || state.loadingOlder))) return;
@@ -644,10 +651,16 @@ window.WorkbenchExecution = ({request, onChange}) => {
     time.textContent = new Date(data.created_at).toLocaleString();
     const body = document.createElement("p"); const payload = data.payload;
     const text = payload.text || payload.message;
-    body.textContent = typeof text === "string" ? text : Object.entries(payload)
-      .map(([key, value]) => `${label(key)}: ${typeof value === "object" ? JSON.stringify(value) : String(value)}`).join("\n");
+    if (data.event_type === "runtime.text") title.textContent = `${state.job?.runtime === "auto" ? "Agent" : label(state.job?.runtime)}${state.job?.model ? ` / ${state.job.model}` : ""}`;
+    body.textContent = typeof text === "string" ? text : "";
+    article.dataset.kind = typeof text === "string" ? "message" : "system";
     if (payload.source === "demo") title.textContent += " · Demo preview";
     article.append(title, time, body); ui.activity.append(article);
+    if (typeof text !== "string" && Object.keys(payload).length) {
+      const details = document.createElement("details"), summary = document.createElement("summary"), content = document.createElement("pre");
+      summary.textContent = "Details"; content.textContent = JSON.stringify(payload, null, 2);
+      details.append(summary, content); article.append(details);
+    }
     state.events += 1; ui["event-empty"].hidden = true;
     if (ui.activity.children.length > 500) ui.activity.firstElementChild.remove();
     ui["event-limit"].hidden = state.events <= 500;
