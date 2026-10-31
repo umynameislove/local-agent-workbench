@@ -6,6 +6,7 @@ import json
 import sqlite3
 import subprocess
 from contextlib import asynccontextmanager
+from html.parser import HTMLParser
 from pathlib import Path
 
 import httpx
@@ -100,6 +101,38 @@ async def test_workspace_assets_have_local_csp_and_no_external_dependencies(tmp_
         assert result.headers["referrer-policy"] == "no-referrer"
     with pytest.raises(ValueError, match="Unknown workspace"):
         asset("../app.py")
+
+
+@pytest.mark.anyio
+async def test_workspace_markup_references_and_new_shell_are_packaged(tmp_path):
+    class Markup(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.identities, self.references, self.scripts = [], [], []
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if "id" in values:
+                self.identities.append(values["id"])
+            for key in ("for", "aria-controls", "aria-labelledby", "aria-describedby"):
+                self.references.extend(values.get(key, "").split())
+            if tag == "script":
+                self.scripts.append(values["src"])
+
+    async with workspace(tmp_path, configured=False) as (_, client):
+        markup = Markup()
+        markup.feed((await client.get("/")).text)
+        assert len(markup.identities) == len(set(markup.identities))
+        assert set(markup.references) <= set(markup.identities)
+        assert markup.scripts == ["/workbench_shell.js", "/project_control.js", "/workspace.js"]
+        for route in markup.scripts:
+            response = await client.get(route)
+            assert response.status_code == 200
+            assert "application/javascript" in response.headers["content-type"]
+        for route in ("/workbench_shell.js", "/api/settings/library"):
+            assert (
+                await client.get(route, headers={"Origin": "https://foreign.invalid"})
+            ).status_code == 403
 
 
 @pytest.mark.anyio
