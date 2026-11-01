@@ -66,6 +66,10 @@ from .logging_setup import configure_logging
 from .model_library import LibraryConflictError, ModelLibrary
 from .native_execution import NativeExecutionService
 from .native_store import NativeAttemptRepository, NativeConflictError, NativeStoreError
+from .phone_control import PhoneControl
+from .phone_notifications import PhoneNotifications
+from .phone_policy import PhonePolicy
+from .phone_store import PhoneError
 from .planning import (
     PlanningConflictError,
     PlanningNotFoundError,
@@ -240,6 +244,9 @@ def create_app(
         app.state.task_workflow = TaskWorkflow(
             app, configuration.verification_commands if configuration else {}
         )
+        app.state.phone_control = PhoneControl(
+            app.state, configuration.phone_control if configuration else PhonePolicy()
+        )
         app.state.recovery_service = RecoveryService(database, runtime.worktrees)
         app.state.recovery_items = app.state.recovery_service.load()
         app.state.schema_version = schema_version
@@ -309,6 +316,54 @@ def create_app(
             raise HTTPException(422, str(error)) from error
         except ConfigurationError as error:
             raise HTTPException(503, str(error)) from error
+
+    def phone_body(payload, fields):
+        if not isinstance(payload, dict) or set(payload) != fields:
+            raise HTTPException(422, "Phone request fields are invalid.")
+
+    @api.post("/api/phone/connect")
+    def phone_connect(request: Request, payload: Annotated[object, Body()]):
+        phone_body(payload, {"bot_id", "owner_id"})
+        service = request.app.state.phone_control
+        try:
+            service.require(payload["bot_id"], payload["owner_id"])
+            service.store.recover()
+            return service.configuration(payload["bot_id"])
+        except (DatabaseError, ConfigurationError):
+            raise HTTPException(403, "Phone control is unavailable. Check local policy.") from None
+
+    @api.post("/api/phone/updates")
+    async def phone_update(request: Request, payload: Annotated[object, Body()]):
+        phone_body(payload, {"bot_id", "update"})
+        try:
+            return await request.app.state.phone_control.process(
+                payload["bot_id"], payload["update"]
+            )
+        except (DatabaseError, ConfigurationError):
+            raise HTTPException(
+                409, "Phone update needs reconciliation. No automatic retry."
+            ) from None
+
+    @api.post("/api/phone/next")
+    def phone_next(request: Request, payload: Annotated[object, Body()]):
+        phone_body(payload, {"bot_id", "owner_id"})
+        try:
+            return {"delivery": PhoneNotifications(request.app.state.phone_control).next(**payload)}
+        except (DatabaseError, ConfigurationError):
+            raise HTTPException(409, "Phone delivery is unavailable. Check local policy.") from None
+
+    @api.post("/api/phone/ack")
+    def phone_ack(request: Request, payload: Annotated[object, Body()]):
+        phone_body(payload, {"bot_id", "owner_id", "delivery_id", "message_id"})
+        service = request.app.state.phone_control
+        try:
+            service.require(payload["bot_id"], payload["owner_id"])
+            if type(payload["delivery_id"]) is not int or payload["delivery_id"] <= 0:
+                raise PhoneError("Delivery identity is invalid.")
+            service.store.acknowledge(payload["delivery_id"], payload["message_id"])
+            return {"accepted": True}
+        except (DatabaseError, ConfigurationError):
+            raise HTTPException(409, "Delivery acknowledgement needs reconciliation.") from None
 
     @api.get("/api/health")
     async def health(request: Request) -> dict[str, object]:

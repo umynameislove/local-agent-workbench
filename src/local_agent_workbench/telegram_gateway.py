@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import getpass
 import json
+import os
 import re
+import stat
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -18,6 +21,34 @@ from .remote_commands import RemoteJournal, RemoteJournalError
 
 class GatewayError(RuntimeError):
     """A sanitized transport or control status failure."""
+
+
+class BotPollerLock:
+    """Keep status and control pollers exclusive within the same runtime home."""
+
+    def __init__(self, runtime, bot_id):
+        self.handle = None
+        if not str(bot_id).isdecimal() or len(str(bot_id)) > 20:
+            raise GatewayError("Bot identity is invalid.")
+        try:
+            descriptor = os.open(
+                runtime / f"telegram-{bot_id}.lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600
+            )
+            self.handle = os.fdopen(descriptor, "a")
+            info = os.fstat(self.handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise GatewayError("Gateway lock is invalid.")
+            fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (OSError, GatewayError):
+            self.close()
+            raise GatewayError(
+                "Another poller is active or the gateway lock is unavailable."
+            ) from None
+
+    def close(self):
+        if self.handle is not None:
+            self.handle.close()
+            self.handle = None
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -286,28 +317,58 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--project", action="append", required=True)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument(
+        "--enable-control",
+        action="store_true",
+        help="Use the explicitly configured phone pilot instead of the status reader.",
+    )
+    parser.add_argument(
+        "--allow-review-content",
+        action="store_true",
+        help="Allow complete bounded frozen reviews to Telegram, matching local policy.",
+    )
+    parser.add_argument(
         "--allow-metadata-egress",
         action="store_true",
         required=True,
-        help="Allow selected project counts to Telegram. No task content is sent.",
+        help="Allow selected project task metadata to Telegram. Status mode sends only counts.",
     )
     args = parser.parse_args(argv)
     if not sys.stdin.isatty():
         parser.error("Use an interactive terminal. Never pass tokens in arguments or a pipe.")
-    print("Telegram will receive aggregate counts for the selected projects. Keep the Mac awake.")
+    print(
+        "Telegram receives selected project metadata. Phone control also receives task requests"
+        " and, only when enabled, frozen review content. Keep the Mac awake."
+    )
+    gateway, poller = None, None
     try:
         runtime = resolve_runtime_home()
         runtime.bootstrap()
         database = Database(runtime.state_db)
         database.initialize()
-        gateway = TelegramGateway(
-            getpass.getpass("Bot token (not stored): "),
-            args.owner_id,
-            args.project,
-            port=args.port,
-            journal=RemoteJournal(database),
-        )
-        print("Status reader started. Press Ctrl+C to stop. No execution commands are enabled.")
+        token = getpass.getpass("Bot token (not stored): ")
+        if args.enable_control:
+            from .phone_gateway import PhoneGateway
+
+            gateway = PhoneGateway(
+                token,
+                args.owner_id,
+                args.project,
+                port=args.port,
+                runtime=runtime.root,
+                allow_review_content=args.allow_review_content,
+            )
+            print(
+                "Phone control started. Creation and approval never start or apply work"
+                " automatically."
+            )
+        else:
+            if args.allow_review_content:
+                raise GatewayError("Review content requires phone control mode.")
+            poller = BotPollerLock(runtime.root, token.split(":", 1)[0])
+            gateway = TelegramGateway(
+                token, args.owner_id, args.project, port=args.port, journal=RemoteJournal(database)
+            )
+            print("Status reader started. No execution commands are enabled.")
         while True:
             gateway.poll_once()
     except (KeyboardInterrupt, EOFError):
@@ -318,6 +379,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    finally:
+        if poller is not None:
+            poller.close()
+        if gateway is not None and hasattr(gateway, "close"):
+            gateway.close()
 
 
 if __name__ == "__main__":
