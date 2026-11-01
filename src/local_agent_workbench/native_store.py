@@ -192,12 +192,18 @@ class NativeAttemptRepository(_Repository):
                 f"{attempt.id}:event:{event.sequence}",
             )
 
-    def cancel(self, job_id: str, attempt_id: str) -> NativeAttempt:
+    def cancel(
+        self, job_id: str, attempt_id: str, *, actor: str | None = None, channel: str = "local"
+    ) -> NativeAttempt:
+        if actor is not None and (not isinstance(actor, str) or not 1 <= len(actor) <= 200):
+            raise NativeConflictError("Cancellation actor is invalid.")
+        if channel not in {"local", "telegram"}:
+            raise NativeConflictError("Cancellation channel is invalid.")
         with self._write_connection() as connection:
             current = self._get(connection, job_id)
             if current is None or current.id != attempt_id:
                 raise NativeConflictError("Native attempt does not match the cancellation.")
-            if current.phase != "settled":
+            if current.phase != "settled" and not current.cancel_requested:
                 connection.execute(
                     "UPDATE native_attempts SET cancel_requested = 1 WHERE id = ?", (attempt_id,)
                 )
@@ -205,7 +211,10 @@ class NativeAttemptRepository(_Repository):
                     connection,
                     job_id,
                     "native.cancel.requested",
-                    {"attempt_id": attempt_id},
+                    {
+                        "attempt_id": attempt_id,
+                        **({"actor": actor, "channel": channel} if actor else {}),
+                    },
                     f"{attempt_id}:cancel",
                 )
             return self._get(connection, job_id)

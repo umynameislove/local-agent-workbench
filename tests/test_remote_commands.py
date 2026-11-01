@@ -8,7 +8,7 @@ from copy import deepcopy
 import pytest
 from test_telegram_gateway import OWNER, TOKEN, status, update
 
-from local_agent_workbench.db import MIGRATIONS, Database
+from local_agent_workbench.db import LATEST_SCHEMA_VERSION, MIGRATIONS, Database
 from local_agent_workbench.remote_commands import RemoteJournal, RemoteJournalError
 from local_agent_workbench.telegram_gateway import GatewayError, TelegramGateway
 
@@ -168,7 +168,7 @@ def test_migration_preserves_native_tables_and_journal_requests_extra_durability
     old = Database(tmp_path / "old.db", migrations=MIGRATIONS[:13])
     assert old.initialize() == 13
     current = Database(old.path)
-    assert current.initialize() == 14
+    assert current.initialize() == LATEST_SCHEMA_VERSION
     with RemoteJournal(current)._connection() as connection:
         assert connection.execute("PRAGMA synchronous").fetchone()[0] == 3
         assert connection.execute("SELECT COUNT(*) FROM native_attempts").fetchone()[0] == 0

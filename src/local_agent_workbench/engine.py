@@ -17,6 +17,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Protocol
 
+from .phone_policy import PhonePolicy
 from .team_config import AgentSystem, TeamConfigError
 
 APP_VERSION = "0.1.0"
@@ -1170,6 +1171,7 @@ class WorkbenchConfig:
     retention: RetentionConfig = RetentionConfig()
     agent_system: AgentSystem = AgentSystem()
     verification_commands: Mapping[str, tuple[str, ...]] = dataclass_field(default_factory=dict)
+    phone_control: PhonePolicy = PhonePolicy()
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> WorkbenchConfig:
@@ -1179,7 +1181,11 @@ class WorkbenchConfig:
             raise ConfigurationError("Config version must be an integer.")
         if value.get("version") not in {1, 2}:
             raise ConfigurationError("Unsupported config version.")
-        if value["version"] == 1 and {"agent_system", "verification_commands"} & set(value):
+        if value["version"] == 1 and {
+            "agent_system",
+            "verification_commands",
+            "phone_control",
+        } & set(value):
             raise ConfigurationError("Agent settings require config version two.")
         if value["version"] == 2 and set(value) - {
             "version",
@@ -1189,6 +1195,7 @@ class WorkbenchConfig:
             "retention",
             "agent_system",
             "verification_commands",
+            "phone_control",
         }:
             raise ConfigurationError("Config contains unsupported fields.")
         project_values = value.get("projects", [])
@@ -1208,8 +1215,14 @@ class WorkbenchConfig:
                 raise ConfigurationError("Provider flags must be booleans.")
             normalized_providers[str(key)] = enabled
         try:
+            phone = PhonePolicy.from_dict(value.get("phone_control", {}))
             agent_system = AgentSystem.from_dict(value.get("agent_system", {}))
             by_id = {project.id: project for project in projects}
+            if any(
+                p not in by_id or by_id[p].sensitivity.value in {"internal", "restricted"}
+                for p in phone.projects
+            ):
+                raise ValueError("Phone control project scope is prohibited.")
             for team in agent_system.teams:
                 if team.project_id not in by_id:
                     raise TeamConfigError("Team project does not exist.")
@@ -1220,7 +1233,7 @@ class WorkbenchConfig:
                     project.cloud_allowed,
                     project.permission_mode.value,
                 )
-        except (TeamConfigError, TypeError, OverflowError) as error:
+        except (ValueError, TypeError, OverflowError) as error:
             raise ConfigurationError("Agent settings violate the project policy.") from error
         commands = value.get("verification_commands", {})
         if not isinstance(commands, Mapping) or any(
@@ -1244,6 +1257,7 @@ class WorkbenchConfig:
             verification_commands=MappingProxyType(
                 {key: tuple(argv) for key, argv in commands.items()}
             ),
+            phone_control=phone,
         )
 
     @classmethod

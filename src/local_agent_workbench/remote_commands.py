@@ -58,11 +58,16 @@ class RemoteJournal(_Repository):
             raise RemoteJournalError("Remote receipt is too large.")
         digest = hashlib.sha256(payload).hexdigest()
         message = update.get("message", {})
+        callback = update.get("callback_query")
+        if isinstance(callback, dict):
+            message = callback.get("message", {})
         message = message if isinstance(message, dict) else {}
-        sender, chat = message.get("from", {}), message.get("chat", {})
+        sender = callback.get("from", {}) if isinstance(callback, dict) else message.get("from", {})
+        chat = message.get("chat", {})
         sender = sender if isinstance(sender, dict) else {}
         chat = chat if isinstance(chat, dict) else {}
-        actor, chat_id, issued = sender.get("id"), chat.get("id"), message.get("date")
+        actor, chat_id = sender.get("id"), chat.get("id")
+        issued = None if isinstance(callback, dict) else message.get("date")
 
         def safe(value):
             return value if type(value) is int and -(2**63) < value < 2**63 else None
