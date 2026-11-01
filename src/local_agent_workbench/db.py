@@ -1175,6 +1175,75 @@ MIGRATIONS += (
     ),
 )
 
+MIGRATIONS += (
+    Migration(
+        version=15,
+        name="phone_control_actions_and_delivery",
+        statements=(
+            """CREATE TABLE phone_actions (
+                token TEXT PRIMARY KEY,
+                scope_hash TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('compose','submit','cancel','decision')),
+                payload TEXT NOT NULL CHECK(json_valid(payload)),
+                payload_hash TEXT NOT NULL CHECK(length(payload_hash)=64),
+                expires_at INTEGER NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'ready' CHECK(phase IN ('ready','running','done')),
+                choice TEXT,
+                outcome TEXT,
+                CHECK((phase='ready' AND choice IS NULL AND outcome IS NULL) OR
+                    (phase='running' AND choice IS NOT NULL AND outcome IS NULL) OR
+                    (phase='done' AND choice IS NOT NULL AND outcome IS NOT NULL))
+            )""",
+            """CREATE TRIGGER phone_action_identity BEFORE UPDATE ON phone_actions
+                WHEN NEW.token!=OLD.token OR NEW.scope_hash!=OLD.scope_hash
+                    OR NEW.kind!=OLD.kind OR NEW.payload!=OLD.payload
+                    OR NEW.payload_hash!=OLD.payload_hash OR NEW.expires_at!=OLD.expires_at
+                    OR (OLD.choice IS NOT NULL AND NEW.choice IS NOT OLD.choice)
+                    OR OLD.phase='done'
+                BEGIN SELECT RAISE(ABORT,'Phone action identity is immutable.'); END""",
+            """CREATE TABLE phone_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scope_hash TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                group_key TEXT NOT NULL,
+                part INTEGER NOT NULL CHECK(part>=0),
+                project_id TEXT REFERENCES projects(id),
+                kind TEXT NOT NULL CHECK(kind IN ('reply','review','notice')),
+                subject TEXT NOT NULL CHECK(json_valid(subject)),
+                packet TEXT NOT NULL CHECK(json_valid(packet)),
+                packet_hash TEXT NOT NULL CHECK(length(packet_hash)=64),
+                action_token TEXT REFERENCES phone_actions(token),
+                expires_at INTEGER NOT NULL,
+                phase TEXT NOT NULL DEFAULT 'ready'
+                    CHECK(phase IN ('ready','sending','sent','uncertain','dropped')),
+                message_id INTEGER,
+                UNIQUE(scope_hash,source_key),
+                CHECK((phase='sent' AND message_id IS NOT NULL AND message_id>0)
+                    OR (phase!='sent' AND message_id IS NULL))
+            )""",
+            """CREATE INDEX phone_delivery_queue ON phone_outbox(scope_hash,phase,id)""",
+            """CREATE TRIGGER phone_outbox_identity BEFORE UPDATE ON phone_outbox
+                WHEN NEW.scope_hash!=OLD.scope_hash OR NEW.source_key!=OLD.source_key
+                    OR NEW.group_key!=OLD.group_key OR NEW.part!=OLD.part
+                    OR NEW.project_id IS NOT OLD.project_id OR NEW.kind!=OLD.kind
+                    OR NEW.subject!=OLD.subject OR NEW.packet!=OLD.packet
+                    OR NEW.packet_hash!=OLD.packet_hash
+                    OR NEW.action_token IS NOT OLD.action_token
+                    OR NEW.expires_at!=OLD.expires_at
+                    OR OLD.phase IN ('sent','uncertain','dropped')
+                    OR (OLD.phase='ready' AND NEW.phase NOT IN ('sending','dropped'))
+                    OR (OLD.phase='sending' AND NEW.phase NOT IN ('sent','uncertain'))
+                BEGIN SELECT RAISE(ABORT,'Phone delivery identity is immutable.'); END""",
+            """CREATE TABLE phone_cursors (
+                scope_hash TEXT PRIMARY KEY,
+                event_id INTEGER NOT NULL DEFAULT 0 CHECK(event_id>=0),
+                muted INTEGER NOT NULL DEFAULT 0 CHECK(muted IN (0,1)),
+                last_send INTEGER NOT NULL DEFAULT 0
+            )""",
+        ),
+    ),
+)
+
 LATEST_SCHEMA_VERSION = MIGRATIONS[-1].version
 
 

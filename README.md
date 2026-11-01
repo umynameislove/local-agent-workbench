@@ -174,7 +174,41 @@ The command verifies the bot's stable identity and stores receipt hashes, fixed 
 
 Each reply freezes only the project scopes whose counts it contains and rechecks their current egress policy before dispatch. A durable send claim permits at most one automatic attempt. A lost or malformed acknowledgement, crash after claim or unconfirmed database acknowledgement retains uncertainty and is never automatically resent. Content free help and withheld notices remain available for local only projects. This favors avoiding duplicates over guaranteed delivery; reconciliation is manual. SQLite requests stronger synchronization for journal writes, but process restart tests do not establish hardware power loss guarantees.
 
-This pilot cannot create, run, stop, resume or approve tasks. The Mac must be awake and both the backend and reader must be running. Credential storage, unattended startup and remote task actions remain separate work. Do not share the bot with another poller or webhook consumer. The Python class retains an optional memory only mode for embedded read only use; the command above always uses durable storage.
+Status mode cannot create, run, stop, resume or approve tasks. The Mac must be awake and both the backend and reader must be running. Credential storage and unattended startup remain separate work. Both CLI modes share a bot lock within one runtime home. Do not share the bot with another runtime, poller or webhook consumer. The Python class retains an optional memory only mode for embedded read only use; the command above always uses durable storage.
+
+## Optional phone control
+
+Phone control adds task creation, a cancellation request for one recorded native attempt, snapshot bound approval and filtered notifications. It is disabled by default. Telegram is a cloud destination: enabling metadata does not enable sending review content, and AI cloud permission does not grant Telegram access.
+
+Use version two private configuration with an existing native team. Add this section, replace both numeric identities and select existing public or private projects. Keep real tokens out of configuration:
+
+```json
+"phone_control": {
+  "enabled": false,
+  "owner_id": 123456789,
+  "bot_id": 987654321,
+  "projects": ["sample-project"],
+  "notifications": false,
+  "review_content": false,
+  "timezone": "Asia/Ho_Chi_Minh",
+  "quiet_start": "22:00",
+  "quiet_end": "08:00"
+}
+```
+
+After explicitly authorizing the selected metadata to Telegram, set `enabled` to true and restart the backend. Start the gateway with the same runtime home, owner and project order:
+
+```bash
+AGENT_WORKBENCH_HOME=../working-local uv run python -m local_agent_workbench.telegram_gateway --owner-id 123456789 --project sample-project --allow-metadata-egress --enable-control
+```
+
+Enter the token only at the hidden prompt. `/start` opens numbered projects, their available native profiles and recent tasks. Select a profile, reply to the bot prompt and confirm the task. Each prompt accepts one request, and confirmation expires after two minutes. Creation saves a task without starting a worker. Opening an active task offers a cancellation confirmation tied to its exact attempt. A recorded request does not prove process termination; unresolved runs still require reconciliation on the Mac.
+
+Review export requires both `review_content: true` and the additional `--allow-review-content` flag. This explicitly allows task summary, relative file names, full bounded patches, checks and warnings to reach Telegram and its cloud history. All review parts must be delivered before a decision can be accepted. Known secret patterns, incomplete or oversized diffs require review on the Mac. Pattern scanning cannot detect every secret, so select projects accordingly. Approval records the original approval ID, complete snapshot hash, owner and channel, preserving the original expiry and checking current files. It never applies a patch, starts a worker, publishes code or spends API credit.
+
+Set `notifications` to true to receive input, review or approval requests, blocked or failed tasks, completed tasks, native reconciliation and urgent deadline notices. Quiet hours defer proactive notices; equal start and end disable the quiet window. `/mute` persists across restarts and `/unmute` restores notifications outside quiet hours. Direct replies remain available. Stale notices are dropped when their task, project policy or approval changes. A shared chat limiter and durable outbox prevent automatic resend after an uncertain outcome, favoring missed messages over duplicates.
+
+Control mode stores prepared task requests and authorized frozen review packets in the private runtime database. Tokens remain only in gateway memory. Changing phone policy revokes the running gateway until backend and gateway restart. Submission, decisions, cancellation and outgoing delivery have durable identities; restarting does not allocate a replacement task or extend an approval. Local fixture tests cover the transport and domain services without contacting Telegram or an AI provider. A real owner controlled bot trial remains necessary before relying on unattended phone operation.
 
 ## Provider capabilities
 

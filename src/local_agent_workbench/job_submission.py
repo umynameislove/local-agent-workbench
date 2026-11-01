@@ -142,6 +142,16 @@ class JobSubmissionService:
         self._config_version = config_version
 
     async def submit(self, payload: object) -> JobRecord:
+        job = await self.prepare(payload)
+        try:
+            return self._jobs.create(job)
+        except JobAlreadyExistsError as error:
+            raise JobSubmissionConflictError("Job identity already exists.") from error
+        except JobRepositoryError as error:
+            raise JobSubmissionUnavailableError("Job storage is unavailable.") from error
+
+    async def prepare(self, payload: object) -> JobCreate:
+        """Freeze a validated submission before its explicit durable confirmation."""
         submission = JobSubmission.from_payload(payload)
         project = self._load_project(submission.project_id)
         binding = None
@@ -179,7 +189,7 @@ class JobSubmissionService:
         }
         if binding is not None:
             snapshot["agent_binding"] = binding
-        job = JobCreate(
+        return JobCreate(
             id=self._id_factory(),
             project_id=submission.project_id,
             request=submission.request,
@@ -187,12 +197,39 @@ class JobSubmissionService:
             runtime=submission.runtime,
             model=submission.model,
         )
-        try:
-            return self._jobs.create(job)
-        except JobAlreadyExistsError as error:
-            raise JobSubmissionConflictError("Job identity already exists.") from error
-        except JobRepositoryError as error:
-            raise JobSubmissionUnavailableError("Job storage is unavailable.") from error
+
+    def commit_prepared(self, job: JobCreate, actor: str) -> JobRecord:
+        """Recover one confirmed phone action without allocating a new task."""
+        from .db import EventRepository
+        from .engine import EventCreate
+
+        encoded = JobRepository._validate_job(job)
+        with self._jobs._write_connection() as connection:
+            row = JobRepository._select_by_id(connection, job.id)
+            if row is not None:
+                existing = JobRepository._to_record(row)
+                if existing.request != job.request or dict(existing.request_snapshot) != dict(
+                    job.request_snapshot
+                ):
+                    raise JobSubmissionConflictError(
+                        "Confirmed task identity has different content."
+                    )
+                return existing
+            project = self._load_project(job.project_id)
+            if self._project_snapshot(project.to_config()) != job.request_snapshot["project"]:
+                raise JobSubmissionConflictError("Project policy changed before confirmation.")
+            if self._teams is None:
+                raise JobSubmissionConflictError("Project team is unavailable.")
+            self._teams.authorize(connection, job)
+            stored = JobRepository._insert(connection, job, encoded)
+            event = EventCreate(
+                job.id,
+                "phone.task.created",
+                {"actor": actor, "channel": "telegram"},
+                f"phone:{job.id}",
+            )
+            EventRepository._append(connection, event, *EventRepository._validate_event(event))
+            return stored
 
     def _load_project(self, project_id: str) -> ProjectRecord:
         if project_id not in self._active_project_ids:

@@ -168,6 +168,11 @@ class SecretScanner:
 
     _maximum_findings = 100
 
+    @classmethod
+    def text_findings(cls, content: str) -> tuple[str, ...]:
+        """Inspect all outgoing text, including removed lines and diff context."""
+        return cls._matches(content)
+
     def scan(self, review: UnifiedDiff) -> SecretScanResult:
         if not isinstance(review, UnifiedDiff):
             raise TypeError("Secret scan requires a UnifiedDiff.")
